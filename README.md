@@ -1,5 +1,7 @@
 # 短剧视界 / 全剧视界
 
+自编译版加入 韩小圈，鬼片，青空
+
 Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、解析、下载和播放均在设备上完成，不依赖旧项目或自建服务。当前源码版本：**1.0.5+79（未验证开发快照）**。1.0.0 起默认版显示名为“短剧视界”、`--all-sources` 全站源版为“全剧视界”，分发文件名前缀为 `duanjushijie` / `quanjushijie`；GitHub Release 只发布短剧视界版安装包，全剧视界版只在 Actions Artifact 下载；Android Actions 不再保留构建日志上传。上一轮（1.0.2+76）新增播放线路选择与线路复用：清晰度按钮右侧新增“线路 N”按钮，点击打开线路列表，可在播放中切换线路并保留当前位置与播放状态；选定线路后，同一剧集的后续集数（含自动连播、遥控上一集 / 下一集、滑动切集、选集菜单）默认复用该线路，不再从第一条线路重新尝试；切换下一集时默认不再弹出暂停按钮，只有单击画面、按空格暂停等原有操作才显示控制层，静默数秒自动隐藏的逻辑保留。线路列表来自站源返回的同一集多地址（按画质优先排序），原生核心新增 `selectRoute` 动作与 `nativePreferredRoute` 收敛 0 值与越界值，Dart 端切换线路时保留原会话再重开，切集时把当前线路索引传给解析与预加载。改动涉及 `lib/player_screen.dart`、`lib/player_controls.dart`、`lib/player_menu.dart`、`lib/television_controls.dart`、`lib/player_interactions.dart`、`lib/core_bridge.dart`、`lib/playback_loader.dart`、`lib/playback_preloader.dart`、`lib/local_media_screen.dart` 与 `native/core` 的播放线路代码。
 
 本轮（1.0.5+79）修复播放详情加载期间重复点击会依次打开多个播放器页面的问题：首页目录卡片、最近观看卡片和“继续观看”共用播放启动互斥状态，第一次点击后的详情请求完成或播放器退出前，后续点击会被忽略。等待期间仍停留在当前页面，不改变现有播放启动交互；新增组件测试覆盖三个入口的重复触发。
