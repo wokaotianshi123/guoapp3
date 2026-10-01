@@ -1,10 +1,10 @@
 name: Build app packages
 
 on:
-  #push:
-    #branches: [main, master]
-    #tags: ['v*']
-  #pull_request:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -192,6 +192,28 @@ jobs:
         with:
           name: ${{ matrix.edition }}-macos
           path: dist/macos/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # 本地服务版：Go 服务器内置网页，浏览器打开 127.0.0.1:8000/web/ 或局域网地址即可使用。
+  # 一次构建两个版本，产物为 duanjushijie.zip、quanjushijie.zip 与打包后的 guoappweb.zip。
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+      - run: python scripts/build_web.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guoappweb
+          path: dist/web/guoappweb.zip
           if-no-files-found: error
           retention-days: 14
 

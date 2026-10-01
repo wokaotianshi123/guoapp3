@@ -70,7 +70,8 @@ jobs:
             -o -name '*-windows-x64-portable.zip' \
             -o -name '*-windows-x64-setup.exe' \
             -o -name '*-macos.zip' \
-            -o -name '*.ipa' \) \
+            -o -name '*.ipa' \
+            -o -name 'guoappweb.zip' \) \
             -exec cp -f {} packages/ \;
           ls -l packages
 
