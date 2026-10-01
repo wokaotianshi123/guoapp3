@@ -6,11 +6,12 @@ import zipfile
 from pathlib import Path
 
 from app_build import BuildVariant, add_variant_argument
+from package_macos import package_macos
 from package_windows import package_windows
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
-parser.add_argument('--platform', choices=['android', 'windows'], required=True)
+parser.add_argument('--platform', choices=['android', 'windows', 'macos'], required=True)
 parser.add_argument('--abi', action='append', choices=['arm64-v8a', 'armeabi-v7a', 'x86_64'])
 add_variant_argument(parser)
 options = parser.parse_args()
@@ -38,9 +39,14 @@ if options.platform == 'android':
         target = output / f'{variant.slug}-{version}-{abi}.apk'
         shutil.copy2(source, target)
         artifacts.append(target)
-else:
+elif options.platform == 'windows':
     try:
         artifacts.extend(package_windows(root, variant, version, output))
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+else:
+    try:
+        artifacts.extend(package_macos(root, variant, version, output))
     except ValueError as error:
         raise SystemExit(str(error)) from error
 

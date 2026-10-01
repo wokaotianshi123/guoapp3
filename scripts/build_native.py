@@ -73,5 +73,25 @@ else:
     compiler = shutil.which('clang')
     if not compiler:
         raise SystemExit('需要安装 Xcode Command Line Tools。')
-    build('darwin', 'arm64' if platform.machine() == 'arm64' else 'amd64', compiler,
-          root / 'native' / 'build' / 'darwin' / 'libduanju_core.dylib')
+    output = root / 'native' / 'build' / 'darwin' / 'libduanju_core.dylib'
+    output.parent.mkdir(parents=True, exist_ok=True)
+    host = 'arm64' if platform.machine() == 'arm64' else 'amd64'
+    slices = []
+    for architecture in (host, 'amd64' if host == 'arm64' else 'arm64'):
+        slice_path = root / 'native' / 'build' / 'darwin' / architecture / 'libduanju_core.dylib'
+        flags = '-arch ' + architecture
+        try:
+            build('darwin', architecture, compiler + ' ' + flags, slice_path,
+                  {'CGO_CFLAGS': flags, 'CGO_LDFLAGS': flags})
+        except subprocess.CalledProcessError:
+            if architecture == host:
+                raise
+            print('未能交叉编译 ' + architecture + ' 原生库，本次仅提供 ' + host + ' 架构。', flush=True)
+            continue
+        slices.append(slice_path)
+    lipo = shutil.which('lipo')
+    if len(slices) > 1 and lipo:
+        subprocess.run([lipo, '-create', *[str(item) for item in slices], '-output', str(output)], check=True)
+    else:
+        shutil.copy2(slices[0], output)
+    print('macOS 原生库架构：' + ' '.join(sorted(item.parent.name for item in slices)), flush=True)
