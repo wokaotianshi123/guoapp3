@@ -2,7 +2,6 @@ import os
 import shutil
 import subprocess
 import zipfile
-from pathlib import Path
 
 
 def package_macos(root, variant, version, output):
@@ -23,9 +22,11 @@ def package_macos(root, variant, version, output):
         missing.append('flutter_assets')
     if missing:
         raise ValueError('macOS 应用缺少文件：' + ', '.join(missing))
-    listing = subprocess.run(['file', str(library)], capture_output=True, text=True, check=False).stdout
-    if 'universal' not in listing and 'Mach-O' not in listing:
-        raise ValueError('macOS 原生库格式异常：' + str(library))
+    file_tool = shutil.which('file')
+    if file_tool:
+        listing = subprocess.run([file_tool, str(library)], capture_output=True, text=True, check=False).stdout
+        if 'universal' not in listing and 'Mach-O' not in listing:
+            raise ValueError('macOS 原生库格式异常：' + str(library))
     output.mkdir(parents=True, exist_ok=True)
     prefix = f'{variant.slug}-{version}-macos'
     archive = output / f'{prefix}.zip'

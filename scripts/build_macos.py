@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from build_mirrors import china_mirror_environment, mirrored_pub_lockfile
 from app_build import BuildVariant, add_variant_argument
