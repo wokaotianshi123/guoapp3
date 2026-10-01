@@ -40,17 +40,39 @@ def ensure_platform(env):
     run([flutter, 'create', '--platforms=macos', '--org', 'com.duanju', '.'], env=env)
 
 
-def configure_product_name():
-    config = root / 'macos' / 'Runner' / 'Configs' / 'AppInfo.xcconfig'
+def apply_settings(config, settings):
     if not config.is_file():
         return
     text = config.read_text(encoding='utf-8')
-    name = 'PRODUCT_NAME = ' + variant.slug
-    identifier = 'PRODUCT_BUNDLE_IDENTIFIER = com.duanju.' + variant.slug
-    for key, value in (('PRODUCT_NAME', name), ('PRODUCT_BUNDLE_IDENTIFIER', identifier)):
+    for key, value in settings.items():
+        line = key + ' = ' + value
         pattern = re.compile(r'(?m)^' + key + r'\s*=.*$')
-        text = pattern.sub(value, text) if pattern.search(text) else text.rstrip() + '\n' + value + '\n'
+        # 追加在文件末尾，保证覆盖同文件里更早的 #include 带来的同名设置。
+        text = pattern.sub('', text).rstrip() + '\n' + line + '\n'
     config.write_text(text, encoding='utf-8')
+
+
+def configure_project():
+    # CI 没有签名证书，必须关闭 Xcode 签名；flutter build macos 的 --no-codesign 曾加入又被回滚，
+    # 不能依赖命令行开关，直接写构建设置最稳妥。
+    settings = {
+        'PRODUCT_NAME': variant.slug,
+        'PRODUCT_BUNDLE_IDENTIFIER': 'com.duanju.' + variant.slug,
+        'CODE_SIGNING_ALLOWED': 'NO',
+        'CODE_SIGNING_REQUIRED': 'NO',
+        'CODE_SIGN_IDENTITY': '-',
+        'CODE_SIGN_STYLE': 'Manual',
+        'ENABLE_HARDENED_RUNTIME': 'NO',
+    }
+    configs = root / 'macos' / 'Runner' / 'Configs'
+    apply_settings(configs / 'AppInfo.xcconfig', settings)
+    apply_settings(configs / 'Release.xcconfig', settings)
+
+
+def build_arguments():
+    help_text = subprocess.run([flutter, 'build', 'macos', '--help'],
+                               capture_output=True, text=True, check=False).stdout
+    return ['--no-codesign'] if '--no-codesign' in help_text else []
 
 
 def rename_application(application):
@@ -94,19 +116,27 @@ def embed_library(application):
             raise SystemExit('macOS 原生库缺少 FFI 入口：' + symbol)
     codesign = shutil.which('codesign')
     if codesign:
-        subprocess.run([codesign, '--force', '--sign', '-', '--timestamp=none', str(library)], check=False)
+        # 关闭 Xcode 签名后产物是未签名的，Apple 芯片要求所有代码都有签名，
+        # 这里按由内到外的顺序补 ad-hoc 签名，最后再签应用包本体。
+        nested = sorted(path for path in frameworks.iterdir()
+                        if path.suffix in ('.framework', '.dylib') or path.is_file())
+        for item in nested:
+            subprocess.run([codesign, '--force', '--sign', '-', '--timestamp=none', str(item)], check=False)
+        for item in sorted(path for path in (application / 'Contents' / 'MacOS').iterdir() if path.is_file()):
+            subprocess.run([codesign, '--force', '--sign', '-', '--timestamp=none', str(item)], check=False)
         subprocess.run([codesign, '--force', '--sign', '-', '--timestamp=none', str(application)], check=False)
 
 
 with china_mirror_environment(environment, options.cn_mirrors, gradle=False) as env:
     with mirrored_pub_lockfile(root, env):
         ensure_platform(env)
-        configure_product_name()
+        configure_project()
         run([sys.executable, str(root / 'scripts' / 'build_native.py'), '--platform', 'darwin',
              *variant.arguments], env=env)
         run([flutter, 'pub', 'get', '--enforce-lockfile'], env=env)
+        build_env = dict(env, CODE_SIGNING_ALLOWED='NO', CODE_SIGNING_REQUIRED='NO', CODE_SIGN_IDENTITY='-')
         run([flutter, 'build', 'macos', '--release', '--no-pub', '--verbose',
-             *variant.flutter_arguments], env=env)
+             *build_arguments(), *variant.flutter_arguments], env=build_env)
         release = root / 'build' / 'macos' / 'Build' / 'Products' / 'Release'
         applications = sorted(path for path in release.glob('*.app') if path.is_dir()) if release.is_dir() else []
         if not applications:
