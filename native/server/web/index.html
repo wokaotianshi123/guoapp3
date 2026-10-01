@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>短剧视界</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#/home" id="brand">短剧视界</a>
+      <select id="source" class="source" title="站源"></select>
+      <form id="search-form" class="search">
+        <input id="search-input" type="search" placeholder="搜索剧名" autocomplete="off" />
+        <button type="submit">搜索</button>
+      </form>
+    </header>
+    <main id="view" class="view"></main>
+    <script src="hls.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
