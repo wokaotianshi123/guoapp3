@@ -624,6 +624,8 @@ func main() {
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		log.Fatalf("无法创建数据目录 %s：%v", directory, err)
 	}
+	// 播放记录与收藏跟着数据目录走，删掉数据目录即可一并清空。
+	setLibraryDirectory(directory)
 	encoded, err := json.Marshal(map[string]any{"action": "initialize", "directory": directory})
 	if err != nil {
 		log.Fatalf("初始化请求编码失败：%v", err)
@@ -651,6 +653,7 @@ func main() {
 	mux.HandleFunc("/api/live/", handleLive)
 	mux.HandleFunc("/api/cover", handleCover)
 	mux.HandleFunc("/api/sources", handleSources)
+	mux.HandleFunc("/api/library", handleLibrary)
 	mux.HandleFunc("/api/info", func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, map[string]any{
 			"name":    editionName(),

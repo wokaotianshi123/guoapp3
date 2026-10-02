@@ -14,32 +14,43 @@ import (
 )
 
 var (
-	ffmpegOnce   sync.Once
+	ffmpegMu     sync.Mutex
 	ffmpegBinary string
 )
 
 // ffmpegPath 优先使用放在可执行程序旁边的 ffmpeg，其次才是 PATH 上的。
+// 结果只在确认存在时才复用：启动后才装好 ffmpeg 的话，下一次请求就能直接用上。
 func ffmpegPath() string {
-	ffmpegOnce.Do(func() {
-		candidates := []string{}
-		if executable, err := os.Executable(); err == nil {
-			directory := filepath.Dir(executable)
-			if runtime.GOOS == "windows" {
-				candidates = append(candidates, filepath.Join(directory, "ffmpeg.exe"))
-			}
-			candidates = append(candidates, filepath.Join(directory, "ffmpeg"))
+	ffmpegMu.Lock()
+	defer ffmpegMu.Unlock()
+	if ffmpegBinary != "" {
+		if info, err := os.Stat(ffmpegBinary); err == nil && !info.IsDir() {
+			return ffmpegBinary
 		}
-		if found, err := exec.LookPath("ffmpeg"); err == nil {
-			candidates = append(candidates, found)
-		}
-		for _, candidate := range candidates {
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				ffmpegBinary = candidate
-				return
-			}
-		}
-	})
+		ffmpegBinary = ""
+	}
+	ffmpegBinary = detectFFmpeg()
 	return ffmpegBinary
+}
+
+func detectFFmpeg() string {
+	candidates := []string{}
+	if executable, err := os.Executable(); err == nil {
+		directory := filepath.Dir(executable)
+		if runtime.GOOS == "windows" {
+			candidates = append(candidates, filepath.Join(directory, "ffmpeg.exe"))
+		}
+		candidates = append(candidates, filepath.Join(directory, "ffmpeg"))
+	}
+	if found, err := exec.LookPath("ffmpeg"); err == nil {
+		candidates = append(candidates, found)
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 const (

@@ -27,6 +27,11 @@ body {
   flex-wrap: wrap;
 }
 .brand { font-size: 17px; font-weight: 700; color: var(--text); text-decoration: none; }
+.fav-btn {
+  padding: 7px 12px; border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--text); font-size: 13px; text-decoration: none;
+}
+.fav-btn:hover, .fav-btn.active { border-color: var(--accent); color: #fff; background: var(--accent); }
 .source, .search input, .search button {
   background: var(--panel-2);
   color: var(--text);
@@ -107,3 +112,49 @@ body {
   background: rgba(240, 160, 32, 0.14); border: 1px solid #f0a020;
   color: var(--text); font-size: 13px; line-height: 1.6;
 }
+.link-btn {
+  background: none; border: 0; color: var(--accent); cursor: pointer;
+  font-size: 13px; padding: 0 2px; text-decoration: underline;
+}
+.btn {
+  padding: 6px 12px; border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--text); cursor: pointer; font-size: 13px;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { border-color: #7a2b2f; color: #ff8b90; }
+.btn.danger:hover { background: #7a2b2f; color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.detail-actions { margin-top: 12px; }
+/* 收藏夹 */
+.lib-tabs {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.lib-tabs .spacer { margin-left: auto; }
+.lib-tab {
+  padding: 7px 14px; border-radius: 999px; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.lib-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.lib-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 14px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line); font-size: 13px; color: var(--muted);
+}
+.lib-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.lib-card { position: relative; }
+.lib-card .lib-link { position: relative; }
+.lib-remove {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  width: 24px; height: 24px; line-height: 1; border-radius: 999px; cursor: pointer;
+  background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff; font-size: 15px; padding: 0;
+}
+.lib-remove:hover { background: var(--accent); }
+.lib-check { position: absolute; top: 6px; left: 6px; z-index: 2; }
+.lib-check input, .lib-all input { width: 16px; height: 16px; accent-color: var(--accent); }
+.progress {
+  height: 4px; margin: 0 10px 10px; border-radius: 999px;
+  background: var(--panel-2); overflow: hidden;
+}
+.progress span { display: block; height: 100%; background: var(--accent); }
