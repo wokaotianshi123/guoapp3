@@ -7,7 +7,33 @@ var searchForm = document.getElementById('search-form');
 
 // 自动连播的开关存在浏览器本地，换浏览器重开也保留上次的选择。
 var AUTO_NEXT_KEY = 'duanjuweb:autoNext';
-var AUTO_NEXT_DELAY = 5;
+// 倍速同样记在本地：切集会重建 <video>，不记下来就会被打回 1 倍速。
+var PLAY_RATE_KEY = 'duanjuweb:playbackRate';
+
+var playbackRate = readPlaybackRate();
+var resumeFullscreen = false;
+var suppressHashRender = false;
+var mountToken = 0;
+
+function readPlaybackRate() {
+  try {
+    var value = Number(window.localStorage.getItem(PLAY_RATE_KEY));
+    if (value >= 0.25 && value <= 4) {
+      return value;
+    }
+  } catch (error) {
+    // 隐私模式读不到本地存储时用默认倍速。
+  }
+  return 1;
+}
+
+function writePlaybackRate(value) {
+  try {
+    window.localStorage.setItem(PLAY_RATE_KEY, String(value));
+  } catch (error) {
+    // 写不进去只在当前会话生效，不影响播放。
+  }
+}
 
 function readAutoNext() {
   try {
@@ -514,8 +540,15 @@ function bindFavoriteToggle(drama) {
   });
 }
 
-// 自动连播：留 5 秒给用户点“取消”，期间 userunload / 换页都会取消倒计时。
-// 只停掉倒计时（保留提示条的显示状态），供 scheduleAutoNext/切换页面共用。
+function episodeHash(id, source, index) {
+  return (
+    '#/play?id=' + encodeURIComponent(id) +
+    '&index=' + index +
+    (source ? '&source=' + encodeURIComponent(source) : '')
+  );
+}
+
+// 自动连播不再做倒计时确认，播完直接加载下一集。
 function stopAutoNextTimer() {
   if (autoNextTimer) {
     clearInterval(autoNextTimer);
@@ -531,66 +564,147 @@ function cancelAutoNext() {
   }
 }
 
-function playNextEpisode() {
+// 换集时同步标题与上一集/下一集按钮状态，并让地址栏跟上（不触发整页重建）。
+function syncEpisodeChrome(index) {
   var drama = state.drama;
-  var total = (state.chapters || []).length;
-  var nextIndex = state.index + 1;
-  if (!drama || nextIndex >= total) {
-    return false;
+  var chapters = state.chapters || [];
+  var title = document.querySelector('.player-title');
+  if (title && drama) {
+    title.textContent = drama.title + ' · ' + ((chapters[index] || {}).title || '');
   }
-  cancelAutoNext();
-  location.hash =
-    '#/play?id=' + encodeURIComponent(drama.id) +
-    '&index=' + nextIndex +
-    (drama.source ? '&source=' + encodeURIComponent(drama.source) : '');
-  window.scrollTo(0, 0);
-  return true;
+  var next = document.getElementById('episode-next');
+  if (next && drama) {
+    if (index + 1 < chapters.length) {
+      next.disabled = false;
+      next.style.display = '';
+    } else {
+      next.style.display = 'none';
+    }
+  }
+  var previous = document.getElementById('episode-previous');
+  if (previous && drama) {
+    if (index > 0) {
+      previous.disabled = false;
+      previous.style.display = '';
+    } else {
+      previous.style.display = 'none';
+    }
+  }
+  var hash = drama ? episodeHash(drama.id, drama.source, index) : '';
+  if (hash && location.hash !== hash) {
+    // 只改地址栏，并标记本次 hashchange 不重建页面（就地换集复用同一个 <video>）。
+    suppressHashRender = true;
+    location.hash = hash;
+  }
 }
 
-// 本集播完后给出倒计时提示到下一集；已是最后一集或开关关闭时只做提示。
-function scheduleAutoNext() {
-  var total = (state.chapters || []).length;
+// 就地换集：复用同一个 <video>，全屏和倍速都不会被重置。
+function playNextEpisode() {
+  var drama = state.drama;
+  var chapters = state.chapters || [];
   var nextIndex = state.index + 1;
-  if (!state.drama || nextIndex >= total) {
+  var video = document.getElementById('player');
+  if (!drama || nextIndex >= chapters.length) {
+    return Promise.resolve(false);
+  }
+  cancelAutoNext();
+  if (!video) {
+    // 播放器还没建好时退回整页跳转。
+    location.hash = episodeHash(drama.id, drama.source, nextIndex);
+    window.scrollTo(0, 0);
+    return Promise.resolve(true);
+  }
+  state.route = 0;
+  flushProgress();
+  showNotice('正在加载下一集…');
+  return apiPlay({
+    drama: drama,
+    chapter: chapters[nextIndex],
+    index: nextIndex,
+    quality: state.quality || 0,
+    route: 0,
+  })
+    .then(function (plan) {
+      if (!document.body.contains(video)) {
+        return false;
+      }
+      state.index = nextIndex;
+      state.plan = plan;
+      var note = document.getElementById('play-note');
+      if (note) {
+        note.textContent = '';
+        note.style.display = 'none';
+      }
+      syncEpisodeChrome(nextIndex);
+      mountVideo(plan.url, 0);
+      libraryRequest({ list: 'history', op: 'put', item: currentEntry(0, 0) }).catch(function () {});
+      return true;
+    })
+    .catch(function (error) {
+      showNotice(error.message || '下一集加载失败，请手动点“下一集”重试。');
+      return false;
+    });
+}
+
+// 上一集：和下一集一样就地换集，复用同一个 <video>，倍速与全屏都不丢。
+function playPreviousEpisode() {
+  var drama = state.drama;
+  var chapters = state.chapters || [];
+  var prevIndex = state.index - 1;
+  var video = document.getElementById('player');
+  if (!drama || prevIndex < 0) {
+    return Promise.resolve(false);
+  }
+  cancelAutoNext();
+  if (!video) {
+    location.hash = episodeHash(drama.id, drama.source, prevIndex);
+    window.scrollTo(0, 0);
+    return Promise.resolve(true);
+  }
+  state.route = 0;
+  flushProgress();
+  showNotice('正在加载上一集…');
+  return apiPlay({
+    drama: drama,
+    chapter: chapters[prevIndex],
+    index: prevIndex,
+    quality: state.quality || 0,
+    route: 0,
+  })
+    .then(function (plan) {
+      if (!document.body.contains(video)) {
+        return false;
+      }
+      state.index = prevIndex;
+      state.plan = plan;
+      var note = document.getElementById('play-note');
+      if (note) {
+        note.textContent = '';
+        note.style.display = 'none';
+      }
+      syncEpisodeChrome(prevIndex);
+      mountVideo(plan.url, 0);
+      libraryRequest({ list: 'history', op: 'put', item: currentEntry(0, 0) }).catch(function () {});
+      return true;
+    })
+    .catch(function (error) {
+      showNotice(error.message || '上一集加载失败，请手动点“上一集”重试。');
+      return false;
+    });
+}
+
+// 本集播完直接进下一集；已是最后一集或开关关闭时只做提示。
+function scheduleAutoNext() {
+  var chapters = state.chapters || [];
+  var nextIndex = state.index + 1;
+  if (!state.drama || nextIndex >= chapters.length) {
     showNotice('已经是最后一集了。');
     return;
   }
   if (!state.autoNext) {
     return;
   }
-  var box = document.getElementById('next-up');
-  if (!box) {
-    playNextEpisode();
-    return;
-  }
-  var title = ((state.chapters || [])[nextIndex] || {}).title || '第 ' + (nextIndex + 1) + ' 集';
-  stopAutoNextTimer();
-  box.innerHTML =
-    '<span><b id="next-left">' + AUTO_NEXT_DELAY + '</b> 秒后自动播放下一集：' +
-    escapeHTML(title) + '</span>' +
-    '<button type="button" class="btn" id="next-now">立即播放</button>' +
-    '<button type="button" class="btn" id="next-cancel">取消</button>';
-  box.style.display = 'flex';
-  document.getElementById('next-now').addEventListener('click', function () {
-    playNextEpisode();
-  });
-  document.getElementById('next-cancel').addEventListener('click', function () {
-    cancelAutoNext();
-    showNotice('已取消自动连播，需要时点“下一集”即可。');
-  });
-  var left = AUTO_NEXT_DELAY;
-  stopAutoNextTimer();
-  autoNextTimer = setInterval(function () {
-    left -= 1;
-    if (left <= 0) {
-      playNextEpisode();
-      return;
-    }
-    var label = document.getElementById('next-left');
-    if (label) {
-      label.textContent = String(left);
-    }
-  }, 1000);
+  playNextEpisode();
 }
 
 function fitVideo(video) {
@@ -658,12 +772,105 @@ function showNotice(message, kind) {
   box.style.display = 'block';
 }
 
+function applyPlaybackRate(video) {
+  if (!video || !(playbackRate > 0)) {
+    return;
+  }
+  try {
+    if (video.playbackRate !== playbackRate) {
+      video.playbackRate = playbackRate;
+    }
+  } catch (error) {
+    // 个别浏览器在加载初期不允许改倍速，loadedmetadata 时会再试一次。
+  }
+}
+
+function rememberPlaybackRate(value) {
+  if (!(value > 0)) {
+    return;
+  }
+  playbackRate = value;
+  writePlaybackRate(value);
+}
+
+// 播放器事件只绑一次：就地换集复用同一个 <video>，避免监听器叠加。
+function bindPlayerEvents(video) {
+  video.addEventListener('ratechange', function () {
+    rememberPlaybackRate(video.playbackRate);
+  });
+  video.addEventListener('playing', function () {
+    var box = document.getElementById('play-note');
+    if (box && box.getAttribute('data-kind') === 'transcode') {
+      box.style.display = 'none';
+    }
+  });
+  video.addEventListener('loadedmetadata', function () {
+    fitVideo(video);
+    applyPlaybackRate(video);
+  });
+  video.addEventListener('timeupdate', function () {
+    reportProgress(false);
+  });
+  video.addEventListener('pause', function () {
+    reportProgress(true);
+  });
+  video.addEventListener('ended', function () {
+    reportProgress(true);
+    scheduleAutoNext();
+  });
+}
+
+// 整页重建前记下倍速与全屏状态，重建后好还原。
+function capturePlaybackState() {
+  var video = document.getElementById('player');
+  if (video) {
+    rememberPlaybackRate(video.playbackRate);
+  }
+  resumeFullscreen =
+    !!video &&
+    (document.fullscreenElement === video || document.webkitFullscreenElement === video);
+}
+
+// 只有用户手势里才可能重新进全屏（点“下一集”链接属于这种情况）；
+// 自动连播走的是就地换集，元素压根没换，不需要这里恢复。
+function restoreFullscreen() {
+  if (!resumeFullscreen) {
+    return;
+  }
+  resumeFullscreen = false;
+  var video = document.getElementById('player');
+  if (!video) {
+    return;
+  }
+  var request =
+    video.requestFullscreen || video.webkitRequestFullscreen || video.webkitEnterFullscreen;
+  if (!request) {
+    return;
+  }
+  try {
+    var result = request.call(video);
+    if (result && typeof result.catch === 'function') {
+      result.catch(function () {});
+    }
+  } catch (error) {
+    // 没有用户手势时浏览器会拒绝，保持非全屏即可。
+  }
+}
+
 function mountVideo(url, resumeAt) {
   var video = document.getElementById('player');
+  if (!video) {
+    return;
+  }
   if (hlsInstance) {
     hlsInstance.destroy();
     hlsInstance = null;
   }
+  if (!video.dataset.bound) {
+    video.dataset.bound = '1';
+    bindPlayerEvents(video);
+  }
+  var token = ++mountToken;
   video.onerror = function () {
     cancelAutoNext();
     showNotice('视频加载失败，可以换个线路或画质重试。');
@@ -700,51 +907,34 @@ function mountVideo(url, resumeAt) {
   } else {
     video.src = url;
   }
+  applyPlaybackRate(video);
   video.play().catch(function (error) {
     // 浏览器可能因为自动播放策略拦截首次播放，提示用户手动点一下。
     if (error && error.name === 'NotAllowedError') {
       showNotice('浏览器阻止了自动播放，请点击播放按钮开始。');
     }
   });
-  // 开始播放后撤掉“正在转码”的提示。
-  video.addEventListener('playing', function () {
-    var box = document.getElementById('play-note');
-    if (box && box.getAttribute('data-kind') === 'transcode') {
-      box.style.display = 'none';
-    }
-  });
   // 续播：有播放记录时跳回上次看到的位置。
   if (resumeAt > 0) {
-    var resumed = false;
-    video.addEventListener('loadedmetadata', function () {
-      if (resumed) {
-        return;
-      }
-      resumed = true;
-      if (video.duration && resumeAt > video.duration - 5) {
-        return;
-      }
-      try {
-        video.currentTime = resumeAt;
-        showNotice('已从上次进度 ' + formatTime(resumeAt) + ' 继续播放。');
-      } catch (error) {
-        // 部分流不允许跳转，忽略即可。
-      }
-    });
+    video.addEventListener(
+      'loadedmetadata',
+      function () {
+        if (token !== mountToken) {
+          return;
+        }
+        if (video.duration && resumeAt > video.duration - 5) {
+          return;
+        }
+        try {
+          video.currentTime = resumeAt;
+          showNotice('已从上次进度 ' + formatTime(resumeAt) + ' 继续播放。');
+        } catch (error) {
+          // 部分流不允许跳转，忽略即可。
+        }
+      },
+      { once: true },
+    );
   }
-  video.addEventListener('loadedmetadata', function () {
-    fitVideo(video);
-  });
-  video.addEventListener('timeupdate', function () {
-    reportProgress(false);
-  });
-  video.addEventListener('pause', function () {
-    reportProgress(true);
-  });
-  video.addEventListener('ended', function () {
-    reportProgress(true);
-    scheduleAutoNext();
-  });
 }
 
 function optionHTML(value, label, selected) {
@@ -756,6 +946,8 @@ function optionHTML(value, label, selected) {
 }
 
 function renderPlay(id, index, source) {
+  // 整页重建会换掉 <video>，先把倍速和全屏状态记下来。
+  capturePlaybackState();
   flushProgress();
   view.innerHTML = '<div class="loading">正在解析播放地址…</div>';
   state.index = index;
@@ -795,11 +987,15 @@ function renderPlay(id, index, source) {
           .join('') +
         '</select></label>';
       var suffix = (state.drama.source ? '&source=' + encodeURIComponent(state.drama.source) : '');
-      var next = index + 1 < (state.chapters || []).length
-        ? '<a class="btn" href="#/play?id=' + encodeURIComponent(id) + '&index=' + (index + 1) + suffix + '">下一集</a>'
+      var hasNextEp = index + 1 < (state.chapters || []).length;
+      var hasPrevEp = index > 0;
+      // 用按钮而不是超链接：点击走就地换集（playNextEpisode / playPreviousEpisode），
+      // 复用同一个 <video>，倍速和全屏都不会被重置。
+      var next = hasNextEp
+        ? '<button type="button" class="btn" id="episode-next">下一集</button>'
         : '';
-      var previous = index > 0
-        ? '<a class="btn" href="#/play?id=' + encodeURIComponent(id) + '&index=' + (index - 1) + suffix + '">上一集</a>'
+      var previous = hasPrevEp
+        ? '<button type="button" class="btn" id="episode-previous">上一集</button>'
         : '';
       var favorite = isFavorite(state.drama)
         ? '<button type="button" class="btn active" id="fav-toggle">已收藏</button>'
@@ -874,6 +1070,21 @@ function renderPlay(id, index, source) {
           }
         });
       }
+      var nextButton = document.getElementById('episode-next');
+      if (nextButton) {
+        nextButton.addEventListener('click', function () {
+          playNextEpisode();
+        });
+      }
+      var previousButton = document.getElementById('episode-previous');
+      if (previousButton) {
+        previousButton.addEventListener('click', function () {
+          playPreviousEpisode();
+        });
+      }
+      // 整页重建（换画质/线路）后，若进入本页前处于全屏，重新进全屏。
+      // 就地换集（下一集/上一集/自动连播）不会走这里，全屏由 <video> 保留。
+      restoreFullscreen();
     });
 }
 
@@ -1092,6 +1303,12 @@ searchForm.addEventListener('submit', function (event) {
 });
 
 window.addEventListener('hashchange', function () {
+  // 就地换集时只改了地址栏（syncEpisodeChrome 会置位 suppressHashRender），
+  // 这时不能再整页重建，否则刚复用的 <video> 会被销毁、倍速与全屏都丢。
+  if (suppressHashRender) {
+    suppressHashRender = false;
+    return;
+  }
   var current = hashParams();
   if (current.path !== 'play') {
     stopPlayback();
