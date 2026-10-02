@@ -90,6 +90,15 @@ body {
 .episodes a:hover { border-color: var(--accent); }
 .player-wrap { max-width: 900px; margin: 0 auto; }
 .player-wrap video { width: 100%; background: #000; border-radius: 10px; display: block; }
+/* 竖屏短剧：按真实比例收窄并居中，画面最大化又不会被上下裁切。
+   --ratio 由 JS 按 videoWidth/videoHeight 填 */
+.player-wrap video.portrait {
+  width: min(100%, calc((100vh - 190px) * var(--ratio, 0.5625)));
+  margin-left: auto; margin-right: auto;
+}
+@media (max-height: 560px) {
+  .player-wrap video.portrait { height: calc(100vh - 150px); width: auto; }
+}
 .player-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
 .player-bar .btn {
   padding: 6px 12px; border-radius: 8px; background: var(--panel-2);
@@ -111,6 +120,16 @@ body {
   display: none; margin: 10px 0 0; padding: 10px 12px; border-radius: 8px;
   background: rgba(240, 160, 32, 0.14); border: 1px solid #f0a020;
   color: var(--text); font-size: 13px; line-height: 1.6;
+}
+.notice.next-up {
+  display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: rgba(58, 140, 255, 0.12); border-color: #3a8cff;
+}
+.notice.next-up b { color: var(--accent); font-size: 15px; }
+.notice.next-up .btn { padding: 4px 10px; }
+.player-bar .toggle { cursor: pointer; user-select: none; }
+.player-bar .toggle input {
+  width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 0;
 }
 .link-btn {
   background: none; border: 0; color: var(--accent); cursor: pointer;

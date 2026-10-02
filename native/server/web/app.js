@@ -5,6 +5,26 @@ var sourceSelect = document.getElementById('source');
 var searchInput = document.getElementById('search-input');
 var searchForm = document.getElementById('search-form');
 
+// 自动连播的开关存在浏览器本地，换浏览器重开也保留上次的选择。
+var AUTO_NEXT_KEY = 'duanjuweb:autoNext';
+var AUTO_NEXT_DELAY = 5;
+
+function readAutoNext() {
+  try {
+    return window.localStorage.getItem(AUTO_NEXT_KEY) !== 'off';
+  } catch (error) {
+    return true;
+  }
+}
+
+function writeAutoNext(value) {
+  try {
+    window.localStorage.setItem(AUTO_NEXT_KEY, value ? 'on' : 'off');
+  } catch (error) {
+    // 隐私模式下写不了本地存储，只在当前会话生效。
+  }
+}
+
 var state = {
   source: 'hongguo',
   categories: [],
@@ -21,6 +41,7 @@ var state = {
   route: 0,
   sourceNames: {},
   ffmpeg: true,
+  autoNext: readAutoNext(),
   library: { history: [], favorites: [] },
   libraryTab: 'history',
   libraryEditing: false,
@@ -29,6 +50,7 @@ var state = {
 
 var hlsInstance = null;
 var lastProgressSave = 0;
+var autoNextTimer = null;
 
 function escapeHTML(value) {
   return String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, function (char) {
@@ -492,7 +514,103 @@ function bindFavoriteToggle(drama) {
   });
 }
 
+// 自动连播：留 5 秒给用户点“取消”，期间 userunload / 换页都会取消倒计时。
+// 只停掉倒计时（保留提示条的显示状态），供 scheduleAutoNext/切换页面共用。
+function stopAutoNextTimer() {
+  if (autoNextTimer) {
+    clearInterval(autoNextTimer);
+    autoNextTimer = null;
+  }
+}
+
+function cancelAutoNext() {
+  stopAutoNextTimer();
+  var box = document.getElementById('next-up');
+  if (box) {
+    box.style.display = 'none';
+  }
+}
+
+function playNextEpisode() {
+  var drama = state.drama;
+  var total = (state.chapters || []).length;
+  var nextIndex = state.index + 1;
+  if (!drama || nextIndex >= total) {
+    return false;
+  }
+  cancelAutoNext();
+  location.hash =
+    '#/play?id=' + encodeURIComponent(drama.id) +
+    '&index=' + nextIndex +
+    (drama.source ? '&source=' + encodeURIComponent(drama.source) : '');
+  window.scrollTo(0, 0);
+  return true;
+}
+
+// 本集播完后给出倒计时提示到下一集；已是最后一集或开关关闭时只做提示。
+function scheduleAutoNext() {
+  var total = (state.chapters || []).length;
+  var nextIndex = state.index + 1;
+  if (!state.drama || nextIndex >= total) {
+    showNotice('已经是最后一集了。');
+    return;
+  }
+  if (!state.autoNext) {
+    return;
+  }
+  var box = document.getElementById('next-up');
+  if (!box) {
+    playNextEpisode();
+    return;
+  }
+  var title = ((state.chapters || [])[nextIndex] || {}).title || '第 ' + (nextIndex + 1) + ' 集';
+  stopAutoNextTimer();
+  box.innerHTML =
+    '<span><b id="next-left">' + AUTO_NEXT_DELAY + '</b> 秒后自动播放下一集：' +
+    escapeHTML(title) + '</span>' +
+    '<button type="button" class="btn" id="next-now">立即播放</button>' +
+    '<button type="button" class="btn" id="next-cancel">取消</button>';
+  box.style.display = 'flex';
+  document.getElementById('next-now').addEventListener('click', function () {
+    playNextEpisode();
+  });
+  document.getElementById('next-cancel').addEventListener('click', function () {
+    cancelAutoNext();
+    showNotice('已取消自动连播，需要时点“下一集”即可。');
+  });
+  var left = AUTO_NEXT_DELAY;
+  stopAutoNextTimer();
+  autoNextTimer = setInterval(function () {
+    left -= 1;
+    if (left <= 0) {
+      playNextEpisode();
+      return;
+    }
+    var label = document.getElementById('next-left');
+    if (label) {
+      label.textContent = String(left);
+    }
+  }, 1000);
+}
+
+function fitVideo(video) {
+  var width = video.videoWidth;
+  var height = video.videoHeight;
+  if (!width || !height) {
+    return;
+  }
+  // 竖屏短剧很常见，按真实比例收窄并居中，画面最大化又不超出屏幕。
+  if (height > width) {
+    video.classList.add('portrait');
+    video.style.setProperty('--ratio', String(width / height));
+  } else {
+    video.classList.remove('portrait');
+    video.style.removeProperty('--ratio');
+  }
+}
+
 function stopPlayback() {
+  cancelAutoNext();
   flushProgress();
   if (hlsInstance) {
     hlsInstance.destroy();
@@ -547,6 +665,7 @@ function mountVideo(url, resumeAt) {
     hlsInstance = null;
   }
   video.onerror = function () {
+    cancelAutoNext();
     showNotice('视频加载失败，可以换个线路或画质重试。');
   };
   var isPlaylist = /\.m3u8($|\?)/i.test(url);
@@ -613,6 +732,9 @@ function mountVideo(url, resumeAt) {
       }
     });
   }
+  video.addEventListener('loadedmetadata', function () {
+    fitVideo(video);
+  });
   video.addEventListener('timeupdate', function () {
     reportProgress(false);
   });
@@ -621,6 +743,7 @@ function mountVideo(url, resumeAt) {
   });
   video.addEventListener('ended', function () {
     reportProgress(true);
+    scheduleAutoNext();
   });
 }
 
@@ -681,6 +804,11 @@ function renderPlay(id, index, source) {
       var favorite = isFavorite(state.drama)
         ? '<button type="button" class="btn active" id="fav-toggle">已收藏</button>'
         : '<button type="button" class="btn" id="fav-toggle">收藏</button>';
+      var hasNext = index + 1 < (state.chapters || []).length;
+      var autoNextBox = hasNext
+        ? '<label class="toggle" title="播完自动跳到下一集">' +
+          '<input type="checkbox" id="auto-next"' + (state.autoNext ? ' checked' : '') + '>自动连播</label>'
+        : '';
       var message = '';
       var kind = '';
       if (plan.message === '需要 ffmpeg 转码' || (plan.mode === 'direct' && plan.encrypted)) {
@@ -703,8 +831,10 @@ function renderPlay(id, index, source) {
         (message ? ' style="display:block"' : '') + '>' +
         escapeHTML(message) +
         '</div>' +
+        '<div class="notice next-up" id="next-up"></div>' +
         '<div class="player-bar">' + qualitySelect + routeSelect +
         '<span class="spacer"></span>' +
+        autoNextBox +
         '<a class="btn" href="#/drama?id=' + encodeURIComponent(id) + suffix + '">返回详情</a>' +
         favorite +
         previous +
@@ -732,6 +862,16 @@ function renderPlay(id, index, source) {
         routeBox.addEventListener('change', function () {
           state.route = Number(routeBox.value);
           renderPlay(id, index, source);
+        });
+      }
+      var autoNextToggle = document.getElementById('auto-next');
+      if (autoNextToggle) {
+        autoNextToggle.addEventListener('change', function () {
+          state.autoNext = autoNextToggle.checked;
+          writeAutoNext(state.autoNext);
+          if (!state.autoNext) {
+            cancelAutoNext();
+          }
         });
       }
     });
@@ -902,6 +1042,7 @@ function renderFavorites(tab) {
 }
 
 function render() {
+  cancelAutoNext();
   var current = hashParams();
   var params = current.params;
   state.source = params.get('source') || state.source;
