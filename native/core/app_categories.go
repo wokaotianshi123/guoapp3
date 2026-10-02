@@ -69,6 +69,8 @@ func validNativeCategory(source, category string) bool {
 		return validGuipianCategory(category)
 	case sourceHanxiaoquan:
 		return validHanxiaoquanCategory(category)
+	case sourceIkanbot:
+		return validIkanbotCategory(category)
 	}
 	if isDuanjuProviderSource(source) {
 		return validDuanjuCategory(source, category)
@@ -138,6 +140,8 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 		all = append(all, d.fetchGuipianCategories()...)
 	case sourceHanxiaoquan:
 		all = append(all, d.fetchHanxiaoquanCategories()...)
+	case sourceIkanbot:
+		all = append(all, d.fetchIkanbotCategories()...)
 	default:
 		if isDuanjuProviderSource(source) {
 			var categories []nativeCategory
