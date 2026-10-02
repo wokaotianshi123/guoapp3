@@ -81,7 +81,10 @@ def start_script(slug):
         '  echo "没有检测到 ffmpeg。"',
         '  echo "红果等站源是加密的 H.265，浏览器无法直接解码，需要 ffmpeg 转码；其余站源不受影响。"',
         '  echo "安装方法：macOS 执行 brew install ffmpeg；Linux 执行 apt install ffmpeg / yum install ffmpeg。"',
-        '  echo "也可以下载 ffmpeg 放到本目录后重新运行本脚本。"',
+        '  echo "下载静态包（解压出 ffmpeg 放到本目录亦可，可加 https://cfkua.wokaotianshi.eu.org/ 前缀加速）："',
+        '  echo "  macOS(Apple 芯片) https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-macos-arm64-gpl.zip"',
+        '  echo "  macOS(Intel)     https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-macos-64-gpl.zip"',
+        '  echo "  Linux(x86_64)    https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.zip"',
         '  echo ""',
         'fi',
         'exec "$BIN" -open',
@@ -90,10 +93,11 @@ def start_script(slug):
 
 
 # Windows 静态版 ffmpeg（约 90 MB）。GitHub 直连在国内常常超时，
-# 默认走 ghfast / cfkua 这类加速前缀，失败再回退到其它镜像。
+# 先走加速前缀（cfkua 为首选，实测可用），失败依次回退到其它镜像。
 FFMPEG_MIRRORS = [
-    'https://ghfast.top/https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip',
     'https://cfkua.wokaotianshi.eu.org/https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip',
+    'https://ghfast.top/https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip',
+    'https://gh-proxy.com/https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip',
     'https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip',
 ]
 
