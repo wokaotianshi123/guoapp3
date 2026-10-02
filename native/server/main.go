@@ -136,22 +136,14 @@ func handleRequest(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, "请求编码失败", http.StatusBadRequest)
 		return
 	}
-	reply := core.NativeRequest(string(encoded))
-	if match := localMediaAddress.FindStringSubmatch(reply); match != nil {
-		mediaPort.Store(match[1])
-		// 播放地址指向本机播放服务，改成经由本服务转发的相对路径，
-		// 这样本机与局域网设备用的是同一个地址。
-		for _, prefix := range []string{
-			"http://127.0.0.1:" + match[1] + "/",
-			"http://localhost:" + match[1] + "/",
-		} {
-			reply = strings.ReplaceAll(reply, prefix, "/api/media/")
-		}
-	}
+	reply := rewriteLocalMedia(core.NativeRequest(string(encoded)))
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(writer, reply)
 }
+
+// 本机播放服务永远在 127.0.0.1，代理设置只会碍事。
+var localTransport = &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 15 * time.Second}).DialContext}
 
 func handleMedia(writer http.ResponseWriter, request *http.Request) {
 	port, _ := mediaPort.Load().(string)
@@ -164,6 +156,7 @@ func handleMedia(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	proxy := &httputil.ReverseProxy{
+		Transport: localTransport,
 		Director: func(outgoing *http.Request) {
 			outgoing.URL.Scheme = "http"
 			outgoing.URL.Host = net.JoinHostPort("127.0.0.1", port)
@@ -192,6 +185,245 @@ func handleMedia(writer http.ResponseWriter, request *http.Request) {
 		},
 	}
 	proxy.ServeHTTP(writer, request)
+}
+
+// rewriteLocalMedia 把核心返回的 127.0.0.1 播放地址改写成经由本服务转发的相对路径，
+// 这样本机与局域网设备用的是同一个地址。
+func rewriteLocalMedia(reply string) string {
+	match := localMediaAddress.FindStringSubmatch(reply)
+	if match == nil {
+		return reply
+	}
+	mediaPort.Store(match[1])
+	for _, prefix := range []string{
+		"http://127.0.0.1:" + match[1] + "/",
+		"http://localhost:" + match[1] + "/",
+	} {
+		reply = strings.ReplaceAll(reply, prefix, "/api/media/")
+	}
+	return reply
+}
+
+type playPlan struct {
+	URL           string `json:"url"`
+	Quality       int    `json:"quality"`
+	Qualities     []int  `json:"qualities"`
+	RouteIndex    int    `json:"routeIndex"`
+	RouteCount    int    `json:"routeCount"`
+	DecryptionKey string `json:"decryptionKey"`
+	Session       string `json:"session"`
+}
+
+type playReply struct {
+	OK    bool     `json:"ok"`
+	Error string   `json:"error"`
+	Data  playPlan `json:"data"`
+}
+
+// pickQuality 默认取 480P：够清晰，转码压力也可控。
+func pickQuality(qualities []int, wanted int) int {
+	if len(qualities) == 0 {
+		return 0
+	}
+	best := 0
+	for _, value := range qualities {
+		if value == wanted {
+			return value
+		}
+		if best == 0 {
+			best = value
+			continue
+		}
+		if abs(value-wanted) < abs(best-wanted) {
+			best = value
+		}
+	}
+	return best
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// probeCodec 抓一段开头判断编码。多数站源的 moov 在文件头部，足以判定；
+// 判断不出来就按可直连处理。
+func probeCodec(rawURL string) (encrypted bool, hevc bool) {
+	client := &http.Client{Transport: localTransport, Timeout: 20 * time.Second}
+	request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return false, false
+	}
+	request.Header.Set("Range", "bytes=0-1048575")
+	response, err := client.Do(request)
+	if err != nil {
+		return false, false
+	}
+	defer response.Body.Close()
+	head, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return false, false
+	}
+	encrypted = bytes.Contains(head, []byte("encv")) || bytes.Contains(head, []byte("enca"))
+	hevc = bytes.Contains(head, []byte("hvc1")) ||
+		bytes.Contains(head, []byte("hev1")) ||
+		bytes.Contains(head, []byte("hvcC"))
+	return encrypted, hevc
+}
+
+func handlePlay(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "只接受 POST 请求", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+	if err != nil {
+		http.Error(writer, "读取请求失败", http.StatusBadRequest)
+		return
+	}
+	payload := map[string]any{}
+	if json.Unmarshal(body, &payload) != nil {
+		http.Error(writer, "请求不是合法 JSON", http.StatusBadRequest)
+		return
+	}
+	dramaID, _ := payload["id"].(string)
+	if dramaID == "" {
+		if nested, ok := payload["drama"].(map[string]any); ok {
+			dramaID, _ = nested["id"].(string)
+		}
+	}
+	index := 0
+	if value, ok := payload["index"].(float64); ok {
+		index = int(value)
+	}
+	quality := 0
+	if value, ok := payload["quality"].(float64); ok {
+		quality = int(value)
+	}
+	route := 0
+	if value, ok := payload["route"].(float64); ok {
+		route = int(value)
+	}
+	force, _ := payload["force"].(bool)
+	if quality <= 0 {
+		quality = 480
+	}
+	if route < 0 {
+		route = 0
+	}
+
+	// 先按默认画质探一次，拿到可选画质后再挑目标画质重新解析。
+	probe := map[string]any{}
+	for key, value := range payload {
+		if key == "quality" || key == "route" || key == "force" || key == "action" {
+			continue
+		}
+		probe[key] = value
+	}
+	probe["action"] = "resolve"
+	probe["route"] = route
+	probe["sequence"] = json.Number(strconv.FormatInt(nextSequence(), 10))
+	encoded, err := json.Marshal(probe)
+	if err != nil {
+		http.Error(writer, "请求编码失败", http.StatusBadRequest)
+		return
+	}
+	first := playReply{}
+	if err := json.Unmarshal([]byte(core.NativeRequest(string(encoded))), &first); err != nil || !first.OK {
+		message := first.Error
+		if message == "" {
+			message = "解析播放地址失败"
+		}
+		writeJSON(writer, map[string]any{"ok": false, "error": message})
+		return
+	}
+	wanted := pickQuality(first.Data.Qualities, quality)
+	if wanted != 0 && wanted != first.Data.Quality {
+		probe["quality"] = wanted
+		probe["sequence"] = json.Number(strconv.FormatInt(nextSequence(), 10))
+		if encoded, err = json.Marshal(probe); err == nil {
+			var second playReply
+			if json.Unmarshal([]byte(core.NativeRequest(string(encoded))), &second) == nil && second.OK {
+				first = second
+			}
+		}
+	}
+
+	plan := first.Data
+	rawURL := plan.URL
+	mediaURL := rewriteLocalMedia(rawURL)
+	encryptedKey := plan.DecryptionKey
+	detectedEncrypted, hevc := probeCodec(rawURL)
+	encrypted := encryptedKey != "" || detectedEncrypted
+
+	answer := map[string]any{
+		"url":        mediaURL,
+		"quality":    plan.Quality,
+		"qualities":  plan.Qualities,
+		"routeIndex": plan.RouteIndex,
+		"routeCount": plan.RouteCount,
+		"encrypted":  encrypted,
+		"hevc":       hevc,
+		"ffmpeg":     ffmpegPath() != "",
+		"mode":       "direct",
+	}
+	binary := ffmpegPath()
+	if binary != "" && (encrypted || hevc || force) {
+		key := jobKey(dramaID, strconv.Itoa(index), strconv.Itoa(wanted), strconv.Itoa(route), encryptedKey)
+		job, err := transcoder.start(key, rawURL, encryptedKey)
+		if err == nil {
+			ready, failure := transcoder.wait(job)
+			if ready {
+				answer["mode"] = "hls"
+				answer["url"] = "/api/live/" + key + "/index.m3u8"
+				answer["transcoding"] = !job.isFinished()
+			} else if failure != "" {
+				answer["message"] = "转码失败：" + failure
+			} else {
+				// ffmpeg 还在准备第一个分片，让播放器自己重试。
+				answer["mode"] = "hls"
+				answer["url"] = "/api/live/" + key + "/index.m3u8"
+				answer["transcoding"] = true
+			}
+		} else {
+			answer["message"] = err.Error()
+		}
+	} else if binary == "" && (encrypted || hevc) {
+		answer["message"] = "需要 ffmpeg 转码"
+	}
+	writeJSON(writer, map[string]any{"ok": true, "data": answer})
+}
+
+func handleLive(writer http.ResponseWriter, request *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/live/"), "/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(writer, request)
+		return
+	}
+	job := transcoder.get(parts[0])
+	if job == nil {
+		http.NotFound(writer, request)
+		return
+	}
+	target := filepath.Clean(filepath.Join(job.dir, filepath.FromSlash(parts[1])))
+	if target != job.dir && !strings.HasPrefix(target, job.dir+string(filepath.Separator)) {
+		http.NotFound(writer, request)
+		return
+	}
+	// 明确给出类型，免得依赖系统 mime 表（.ts 在部分系统上会被识别错）。
+	switch strings.ToLower(filepath.Ext(target)) {
+	case ".m3u8":
+		writer.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	case ".ts", ".m4s":
+		writer.Header().Set("Content-Type", "video/mp2t")
+	case ".mp4":
+		writer.Header().Set("Content-Type", "video/mp4")
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(writer, request, target)
 }
 
 // 封面转换串行执行：单张转换只需几十毫秒，串行足以撑住本地页面的并发。
@@ -414,7 +646,9 @@ func main() {
 	})
 	mux.Handle("/web/", http.StripPrefix("/web/", http.FileServer(http.FS(site))))
 	mux.HandleFunc("/api/request", handleRequest)
+	mux.HandleFunc("/api/play", handlePlay)
 	mux.HandleFunc("/api/media/", handleMedia)
+	mux.HandleFunc("/api/live/", handleLive)
 	mux.HandleFunc("/api/cover", handleCover)
 	mux.HandleFunc("/api/sources", handleSources)
 	mux.HandleFunc("/api/info", func(writer http.ResponseWriter, request *http.Request) {
@@ -423,8 +657,16 @@ func main() {
 			"slug":    editionSlug,
 			"version": appVersion,
 			"port":    *port,
+			"ffmpeg":  ffmpegPath(),
 		})
 	})
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			transcoder.sweep()
+		}
+	}()
 
 	address := net.JoinHostPort(*host, strconv.Itoa(*port))
 	listener, err := net.Listen("tcp", address)
@@ -438,6 +680,13 @@ func main() {
 		fmt.Printf("  http://%s/web/\n", item)
 	}
 	fmt.Printf("数据目录：%s\n", directory)
+	// 加密的 H.265 站源（如红果）必须靠 ffmpeg 转码才能在浏览器里播放。
+	if binary := ffmpegPath(); binary != "" {
+		fmt.Printf("已检测到 ffmpeg：%s（加密/HEVC 站源将自动转码播放）\n", binary)
+	} else {
+		fmt.Println("未检测到 ffmpeg：红果等加密站源无法在浏览器播放，")
+		fmt.Println("  安装 ffmpeg 后放到本目录或加入 PATH 并重启即可，其余站源不受影响。")
+	}
 	fmt.Println("关闭本窗口或按 Ctrl+C 停止服务。")
 	fmt.Println()
 	if *open {

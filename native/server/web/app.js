@@ -17,6 +17,8 @@ var state = {
   chapters: [],
   plan: null,
   index: 0,
+  quality: 0,
+  route: 0,
 };
 
 var hlsInstance = null;
@@ -255,35 +257,44 @@ function stopPlayback() {
     hlsInstance.destroy();
     hlsInstance = null;
   }
-  if (state.plan && state.plan.session) {
-    api({ action: 'release', session: state.plan.session }).catch(function () {});
-  }
   state.plan = null;
 }
 
-// 红果等站源的视频是 H.265/HEVC 编码，浏览器能否直接播放取决于平台解码器。
-function hevcSupported() {
-  try {
-    var video = document.createElement('video');
-    return !!(
-      video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') ||
-      video.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"')
-    );
-  } catch (error) {
-    return false;
-  }
+function apiPlay(payload) {
+  return fetch('/api/play', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      if (!data.ok) {
+        throw new Error(data.error || '解析播放地址失败');
+      }
+      return data.data;
+    });
 }
+
+// 红果等站源的视频是加密的 H.265，浏览器既不能解密也不能解码，
+// 只能由服务端用 ffmpeg 解密重编码后再播。
+var FFMPEG_HINT =
+  '这一集是加密的 H.265 视频，浏览器无法直接播放，需要服务端转码。' +
+  '请先安装 ffmpeg（Windows：winget install ffmpeg；macOS：brew install ffmpeg），' +
+  '放到本程序同一个目录或加入 PATH，然后重启本地服务。';
 
 var HEVC_NOTICE =
   '该视频采用 H.265/HEVC 编码，当前浏览器无法解码。' +
-  '建议改用 Safari / Edge 浏览器；Windows 用户可在"设置 → 应用 → 可选功能"中安装' +
-  '"HEVC 视频扩展"后重试；也可以稍后在手机端打开本页播放。';
+  '建议改用 Safari / Edge；Windows 用户可在「设置 → 应用 → 可选功能」安装' +
+  '「HEVC 视频扩展」后重试。';
 
-function showNotice(message) {
+function showNotice(message, kind) {
   var box = document.getElementById('play-note');
   if (!box) {
     return;
   }
+  box.setAttribute('data-kind', kind || '');
   box.textContent = message;
   box.style.display = 'block';
 }
@@ -295,41 +306,61 @@ function mountVideo(url) {
     hlsInstance = null;
   }
   video.onerror = function () {
-    if (/\.mp4($|\?)/i.test(url) && !hevcSupported()) {
-      showNotice(HEVC_NOTICE);
-    } else {
-      showNotice('视频加载失败，请点"换线路"重试。');
-    }
+    showNotice('视频加载失败，可以换个线路或画质重试。');
   };
   var isPlaylist = /\.m3u8($|\?)/i.test(url);
+  var mediaRecoveries = 0;
   if (isPlaylist && window.Hls && window.Hls.isSupported()) {
-    hlsInstance = new window.Hls({ enableWorker: true });
+    hlsInstance = new window.Hls({
+      enableWorker: true,
+      manifestLoadPolicy: {
+        default: {
+          maxTimeToFirstByteMs: 60000,
+          maxLoadTimeMs: 120000,
+          timeoutRetry: { maxNumRetry: 10, retryDelayMs: 1000, maxRetryDelayMs: 8000, backoff: 'linear' },
+          errorRetry: { maxNumRetry: 10, retryDelayMs: 2000, maxRetryDelayMs: 10000, backoff: 'linear' },
+        },
+      },
+    });
+    hlsInstance.on(window.Hls.Events.ERROR, function (event, data) {
+      if (!data || !data.fatal) {
+        return;
+      }
+      // 播放追上转码进度时会缓冲停滞，这属于正常现象，恢复播放等转码跟上即可。
+      if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 4) {
+        mediaRecoveries += 1;
+        showNotice('缓冲中…服务端转码需要一点时间，会自动继续播放。', 'transcode');
+        hlsInstance.recoverMediaError();
+        return;
+      }
+      showNotice('播放失败：' + (data.details || data.type || '未知错误'));
+    });
     hlsInstance.loadSource(url);
     hlsInstance.attachMedia(video);
-  } else if (isPlaylist && video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = url;
   } else {
     video.src = url;
   }
-  video.play().catch(function () {});
+  video.play().catch(function (error) {
+    // 浏览器可能因为自动播放策略拦截首次播放，提示用户手动点一下。
+    if (error && error.name === 'NotAllowedError') {
+      showNotice('浏览器阻止了自动播放，请点击播放按钮开始。');
+    }
+  });
+  // 开始播放后撤掉“正在转码”的提示。
+  video.addEventListener('playing', function () {
+    var box = document.getElementById('play-note');
+    if (box && box.getAttribute('data-kind') === 'transcode') {
+      box.style.display = 'none';
+    }
+  });
 }
 
-function resolve(index, quality, route) {
-  var chapter = (state.chapters || [])[index];
-  var payload = {
-    action: route === undefined ? 'resolve' : 'selectRoute',
-    drama: state.drama,
-    chapter: chapter,
-    index: index,
-    quality: quality || 0,
-  };
-  if (route === undefined) {
-    payload.route = 0;
-  } else {
-    payload.session = state.plan ? state.plan.session : '';
-    payload.route = route;
-  }
-  return api(payload);
+function optionHTML(value, label, selected) {
+  return (
+    '<option value="' + escapeHTML(String(value)) + '"' + (selected ? ' selected' : '') + '>' +
+    escapeHTML(label) +
+    '</option>'
+  );
 }
 
 function renderPlay(id, index) {
@@ -337,61 +368,87 @@ function renderPlay(id, index) {
   state.index = index;
   return ensureDrama(id)
     .then(function () {
-      return resolve(index, 0, undefined);
+      return apiPlay({
+        drama: state.drama,
+        chapter: (state.chapters || [])[index],
+        index: index,
+        quality: state.quality || 0,
+        route: state.route || 0,
+      });
     })
     .then(function (plan) {
       state.plan = plan;
       var qualities = plan.qualities || [];
-      var qualityButtons = qualities.length
-        ? qualities
+      var current = plan.quality || 0;
+      if (qualities.indexOf(current) === -1 && qualities.length) {
+        current = qualities[0];
+      }
+      var qualitySelect = qualities.length
+        ? '<label>画质 <select id="quality-select">' +
+          qualities
             .map(function (item) {
-              return '<button class="btn" data-quality="' + item + '">' + item + 'P</button>';
+              return optionHTML(item, item + 'P', item === current);
             })
-            .join('')
+            .join('') +
+          '</select></label>'
         : '';
-      var routes = plan.routeCount > 1
-        ? '<button class="btn" id="route">换线路（' + (plan.routeIndex + 1) + '/' + plan.routeCount + '）</button>'
-        : '';
+      var routeTotal = plan.routeCount || 1;
+      var routeSelect =
+        '<label>线路 <select id="route-select">' +
+        Array.apply(null, new Array(routeTotal))
+          .map(function (unused, position) {
+            return optionHTML(position, '线路 ' + (position + 1) + '/' + routeTotal, position === (plan.routeIndex || 0));
+          })
+          .join('') +
+        '</select></label>';
       var next = index + 1 < (state.chapters || []).length
         ? '<a class="btn" href="#/play?id=' + encodeURIComponent(id) + '&index=' + (index + 1) + '">下一集</a>'
         : '';
       var previous = index > 0
         ? '<a class="btn" href="#/play?id=' + encodeURIComponent(id) + '&index=' + (index - 1) + '">上一集</a>'
         : '';
-      // 红果等站源固定输出 H.265/HEVC，浏览器缺解码器时提前告知，而不是只留一个黑屏。
-      var notice = /\.mp4($|\?)/i.test(plan.url || '') && !hevcSupported()
-        ? '<div class="notice" id="play-note" style="display:block">' + escapeHTML(HEVC_NOTICE) + '</div>'
-        : '<div class="notice" id="play-note" style="display:none"></div>';
+      var message = '';
+      var kind = '';
+      if (plan.message === '需要 ffmpeg 转码' || (plan.mode === 'direct' && plan.encrypted)) {
+        message = FFMPEG_HINT;
+      } else if (plan.mode === 'direct' && plan.hevc) {
+        message = HEVC_NOTICE;
+      } else if (plan.transcoding) {
+        message = '服务端正在转码，首次缓冲可能需要十几秒…';
+        kind = 'transcode';
+      } else if (plan.message) {
+        message = plan.message;
+      }
       view.innerHTML =
         '<div class="player-wrap">' +
         '<div class="player-title">' +
         escapeHTML(state.drama.title) + ' · ' + escapeHTML(((state.chapters || [])[index] || {}).title || '') +
         '</div>' +
         '<video id="player" controls autoplay playsinline></video>' +
-        notice +
-        '<div class="player-bar">' + qualityButtons + routes +
+        '<div class="notice" id="play-note" data-kind="' + kind + '"' +
+        (message ? ' style="display:block"' : '') + '>' +
+        escapeHTML(message) +
+        '</div>' +
+        '<div class="player-bar">' + qualitySelect + routeSelect +
         '<span class="spacer"></span>' +
         '<a class="btn" href="#/drama?id=' + encodeURIComponent(id) + '">返回详情</a>' +
         previous +
         next +
         '</div></div>';
       mountVideo(plan.url);
-      Array.prototype.forEach.call(view.querySelectorAll('[data-quality]'), function (button) {
-        button.addEventListener('click', function () {
-          resolve(index, Number(button.getAttribute('data-quality')), undefined).then(function (updated) {
-            state.plan = updated;
-            mountVideo(updated.url);
-          });
+      var qualityBox = document.getElementById('quality-select');
+      if (qualityBox) {
+        qualityBox.addEventListener('change', function () {
+          state.quality = Number(qualityBox.value);
+          state.route = 0;
+          renderPlay(id, index);
         });
-      });
-      var routeButton = document.getElementById('route');
-      if (routeButton) {
-        routeButton.addEventListener('click', function () {
-          var current = state.plan && state.plan.routeIndex ? state.plan.routeIndex : 0;
-          resolve(index, 0, (current + 1) % (state.plan.routeCount || 1)).then(function (updated) {
-            state.plan = updated;
-            mountVideo(updated.url);
-          });
+      }
+      var routeBox = document.getElementById('route-select');
+      if (routeBox) {
+        routeBox.addEventListener('change', function () {
+          state.route = Number(routeBox.value);
+          renderPlay(id, index);
         });
       }
     });
@@ -444,6 +501,9 @@ window.addEventListener('hashchange', function () {
   var current = hashParams();
   if (current.path !== 'play') {
     stopPlayback();
+  } else if (Number(current.params.get('index') || 0) !== state.index) {
+    // 换集时回到默认线路，画质沿用上次的选择。
+    state.route = 0;
   }
   render();
 });

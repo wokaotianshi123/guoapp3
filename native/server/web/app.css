@@ -92,6 +92,15 @@ body {
 }
 .player-bar .btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .player-bar .spacer { margin-left: auto; }
+.player-bar label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.player-bar select {
+  padding: 6px 10px; border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--text); font-size: 13px; cursor: pointer;
+}
+.player-bar a.btn {
+  padding: 6px 12px; border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--text); text-decoration: none; font-size: 13px;
+}
 .player-title { font-size: 16px; margin-bottom: 10px; }
 .notice {
   display: none; margin: 10px 0 0; padding: 10px 12px; border-radius: 8px;
