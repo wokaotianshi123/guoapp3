@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // 爱看机器人（ikanbot）原生站源：搜索引擎式站点，聚合全网免费在线播放资源，
@@ -31,12 +32,18 @@ import (
 // 线路接口返回 data.list，每项 resData 是 JSON 字符串 "[{\"flag\":\"线路名\",
 // \"url\":\"第01集$https://.../index.m3u8#第02集$https://...\"}]"，
 // 分集之间用 # 分隔、名称与地址之间用 $ 分隔。
+//
+// 一部片子通常有 30 条左右线路（gsm3u8 / jsm3u8 / 1080zyk …），各线路的分集完整度
+// 与 CDN 都不同，同一集可能有几十个可用地址。因此详情只拿分集最全的一条线路建分集，
+// 播放时把每条线路同名的那一集一起作为 providerMedia.Variants 交给播放层，
+// 这样播放器里的「播放线路」可以逐条切换，某条线路失效时不用重新解析。
 
 const (
 	ikanbotSiteBaseURL = "https://www1.ikanbot.com"
 	ikanbotUserAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 	ikanbotPageSize    = 36
 	ikanbotMaxLines    = 40
+	ikanbotLineTTL     = 10 * time.Minute
 )
 
 // 分类 ID 形如 "{kind}-{名称}"，与 /hot/index-{id}.html 一一对应。
@@ -76,7 +83,46 @@ var (
 	reIkanbotTagName   = regexp.MustCompile(`<[^>]+>`)
 	reIkanbotEpisodeNo = regexp.MustCompile(`(\d+)`)
 	reIkanbotYear      = regexp.MustCompile(`(19|20)\d{2}`)
+	reIkanbotFlagRes   = regexp.MustCompile(`(2160|1440|1080|720|480)`)
 )
+
+// ikanbotEpisode 一条线路里的一集。Order 优先取名称里的数字（第01集 → 1），
+// 电影这类没有集数的名称（正片 / HD中字）退化为列表位置，用于跨线路对齐同一集。
+type ikanbotEpisode struct {
+	Name  string
+	URL   string
+	Order int
+}
+
+// ikanbotLine 一条完整线路：线路名 + 该线路的分集列表。
+type ikanbotLine struct {
+	Flag     string
+	Episodes []ikanbotEpisode
+}
+
+type ikanbotLineEntry struct {
+	lines     []ikanbotLine
+	expiresAt time.Time
+}
+
+type ikanbotLineCall struct {
+	done  chan struct{}
+	lines []ikanbotLine
+	err   error
+}
+
+// ikanbotPlayMeta 详情页里线路接口需要的字段，顺带带上封面与简介。
+type ikanbotPlayMeta struct {
+	Title     string
+	Cover     string
+	Desc      string
+	Year      string
+	Region    string
+	Actors    string
+	CurrentID string
+	Token     string
+	MType     string
+}
 
 // ikanbotClean 去标签、解 HTML 实体、压缩空白。
 func ikanbotClean(text string) string {
@@ -352,9 +398,9 @@ type ikanbotResEntry struct {
 }
 
 type ikanbotResPayload struct {
-	State    int    `json:"state"`
-	Message  string `json:"message"`
-	Data     struct {
+	State   int    `json:"state"`
+	Message string `json:"message"`
+	Data    struct {
 		List []struct {
 			SiteID  int    `json:"siteId"`
 			ID      int64  `json:"id"`
@@ -363,9 +409,79 @@ type ikanbotResPayload struct {
 	} `json:"data"`
 }
 
-// ikanbotLines 取线路列表，需要先用详情里的 current_id 与一次性令牌算出签名。
-func (d *Downloader) ikanbotLines(ctx context.Context, sourceID, currentID, eToken, mType string) ([]ikanbotResEntry, error) {
-	sign := ikanbotSign(currentID, eToken)
+// parseIkanbotLines 把线路接口返回的原始结构整理成按分集数降序的线路列表。
+// 站点经常把同一份源挂在不同 flag 下（实测 xlm3u8 与 subm3u8 完全一致），
+// 这里按全部分集地址去重，避免播放器里出现两条一模一样的线路。
+func parseIkanbotLines(payload ikanbotResPayload) []ikanbotLine {
+	lines := make([]ikanbotLine, 0, len(payload.Data.List))
+	seen := map[string]bool{}
+	for _, item := range payload.Data.List {
+		entries := []ikanbotResEntry{}
+		if err := json.Unmarshal([]byte(item.ResData), &entries); err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			episodes := make([]ikanbotEpisode, 0, 8)
+			orders := map[int]bool{}
+			signature := strings.Builder{}
+			for index, pair := range ikanbotSplitEpisodes(entry.URL) {
+				address := ikanbotFixMediaURL(pair[1])
+				if address == "" {
+					continue
+				}
+				name := ikanbotClean(pair[0])
+				order := index + 1
+				if number := reIkanbotEpisodeNo.FindString(name); number != "" {
+					if parsed, err := strconv.Atoi(number); err == nil && parsed > 0 && parsed <= 100000 {
+						order = parsed
+					}
+				}
+				if orders[order] {
+					continue
+				}
+				orders[order] = true
+				episodes = append(episodes, ikanbotEpisode{Name: name, URL: address, Order: order})
+				signature.WriteString(address)
+				signature.WriteByte('\n')
+			}
+			if len(episodes) == 0 {
+				continue
+			}
+			key := signature.String()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			lines = append(lines, ikanbotLine{Flag: strings.TrimSpace(entry.Flag), Episodes: episodes})
+		}
+	}
+	// 分集最全的线路排在前面，详情用它建分集、播放时它作为默认线路。
+	sort.SliceStable(lines, func(i, j int) bool { return len(lines[i].Episodes) > len(lines[j].Episodes) })
+	if len(lines) > ikanbotMaxLines {
+		lines = lines[:ikanbotMaxLines]
+	}
+	return lines
+}
+
+// fetchIkanbotLines 拉取线路列表，需要先用详情里的 current_id 与一次性令牌算出签名。
+// meta 非空时复用调用方已经拿到的详情页，省一次请求。
+func (d *Downloader) fetchIkanbotLines(ctx context.Context, sourceID string, meta *ikanbotPlayMeta) ([]ikanbotLine, error) {
+	currentID, token, mType := sourceID, "", ""
+	if meta != nil {
+		currentID, token, mType = meta.CurrentID, meta.Token, meta.MType
+	}
+	if token == "" {
+		body, err := d.ikanbotGet(ctx, "/play/"+sourceID)
+		if err != nil {
+			return nil, err
+		}
+		page, err := parseIkanbotPlayPage(body, sourceID)
+		if err != nil {
+			return nil, err
+		}
+		currentID, token, mType = page.CurrentID, page.Token, page.MType
+	}
+	sign := ikanbotSign(currentID, token)
 	if sign == "" {
 		return nil, errors.New("爱看机器人播放令牌无效，请刷新详情")
 	}
@@ -389,26 +505,96 @@ func (d *Downloader) ikanbotLines(ctx context.Context, sourceID, currentID, eTok
 		}
 		return nil, errors.New("爱看机器人线路获取失败：" + message)
 	}
-	// 同一站内不同线路的分集完整度差别很大，统一取分集数最多的那条。
-	best := make([]ikanbotResEntry, 0, 8)
-	bestCount := 0
-	for _, line := range payload.Data.List {
-		entries := []ikanbotResEntry{}
-		if err := json.Unmarshal([]byte(line.ResData), &entries); err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			count := len(ikanbotSplitEpisodes(entry.URL))
-			if count > bestCount {
-				bestCount = count
-				best = []ikanbotResEntry{{Flag: entry.Flag, URL: entry.URL}}
-			}
-		}
-	}
-	if bestCount == 0 {
+	lines := parseIkanbotLines(payload)
+	if len(lines) == 0 {
 		return nil, errors.New("爱看机器人暂无可播放线路")
 	}
-	return best, nil
+	return lines, nil
+}
+
+// ikanbotLines 带短缓存与单飞的线路入口：详情与播放解析共用同一份结果，
+// 避免连续切换分集时反复抓详情页换令牌。
+func (d *Downloader) ikanbotLines(ctx context.Context, sourceID string, meta *ikanbotPlayMeta) ([]ikanbotLine, error) {
+	d.providerMu.Lock()
+	if cached, found := d.ikanbotLineCache[sourceID]; found && time.Now().Before(cached.expiresAt) {
+		d.providerMu.Unlock()
+		return cached.lines, nil
+	}
+	if pending := d.ikanbotLinePending[sourceID]; pending != nil {
+		d.providerMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-pending.done:
+			if (errors.Is(pending.err, context.Canceled) || errors.Is(pending.err, context.DeadlineExceeded)) && ctx.Err() == nil {
+				return d.ikanbotLines(ctx, sourceID, meta)
+			}
+			return pending.lines, pending.err
+		}
+	}
+	if d.ikanbotLinePending == nil {
+		d.ikanbotLinePending = make(map[string]*ikanbotLineCall)
+	}
+	call := &ikanbotLineCall{done: make(chan struct{})}
+	d.ikanbotLinePending[sourceID] = call
+	d.providerMu.Unlock()
+	lines, err := d.fetchIkanbotLines(ctx, sourceID, meta)
+	d.providerMu.Lock()
+	if err == nil {
+		if d.ikanbotLineCache == nil || len(d.ikanbotLineCache) >= 64 {
+			d.ikanbotLineCache = make(map[string]ikanbotLineEntry)
+		}
+		d.ikanbotLineCache[sourceID] = ikanbotLineEntry{lines: lines, expiresAt: time.Now().Add(ikanbotLineTTL)}
+	}
+	call.lines, call.err = lines, err
+	delete(d.ikanbotLinePending, sourceID)
+	close(call.done)
+	d.providerMu.Unlock()
+	return lines, err
+}
+
+// ikanbotLineEpisode 在一条线路里按集号取对应分集。电影各线路的分集名不同
+// （正片 / HD中字 / TC），只有一集时直接取它。
+func ikanbotLineEpisode(line ikanbotLine, order int) (ikanbotEpisode, bool) {
+	for _, episode := range line.Episodes {
+		if episode.Order == order {
+			return episode, true
+		}
+	}
+	if len(line.Episodes) == 1 && order == 1 {
+		return line.Episodes[0], true
+	}
+	return ikanbotEpisode{}, false
+}
+
+// ikanbotEpisodeOptions 把各条线路里同一集的地址整理成可切换的线路列表。
+func ikanbotEpisodeOptions(lines []ikanbotLine, order int, referer string) []providerMedia {
+	options := make([]providerMedia, 0, len(lines))
+	seen := map[string]bool{}
+	for _, line := range lines {
+		episode, found := ikanbotLineEpisode(line, order)
+		if !found || seen[episode.URL] {
+			continue
+		}
+		seen[episode.URL] = true
+		options = append(options, providerMedia{
+			URL: episode.URL, Referer: referer, Quality: ikanbotLineQuality(line.Flag),
+		})
+	}
+	return options
+}
+
+// ikanbotLineQuality 线路名里带分辨率时（如 1080zyk）标出画质，供播放器排序。
+func ikanbotLineQuality(flag string) int {
+	match := reIkanbotFlagRes.FindString(strings.ToLower(flag))
+	if match == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(match)
+	if err != nil || value < 480 || value > 2160 {
+		return 0
+	}
+	return value
 }
 
 func ikanbotGetResURL(site, videoID, mType, sign string) string {
@@ -435,12 +621,74 @@ func ikanbotSplitEpisodes(raw string) [][2]string {
 		}
 		name := strings.TrimSpace(pieces[0])
 		address := strings.TrimSpace(pieces[1])
+		// 少数线路会在地址后面再挂一个 "$线路名" 标记（实测 yhm3u8 每条都带），
+		// 带着尾巴去请求会 500，截掉后正常。
+		if cut, _, found := strings.Cut(address, "$"); found {
+			address = strings.TrimSpace(cut)
+		}
 		if address == "" {
 			continue
 		}
 		pairs = append(pairs, [2]string{name, address})
 	}
 	return pairs
+}
+
+// parseIkanbotPlayPage 从播放页取出线路接口需要的 current_id / e_token / mtype，
+// 以及标题、封面与简介。
+func parseIkanbotPlayPage(body, sourceID string) (ikanbotPlayMeta, error) {
+	meta := ikanbotPlayMeta{CurrentID: sourceID, MType: "1"}
+	if match := reIkanbotTitle.FindStringSubmatch(body); len(match) > 1 {
+		meta.Title = ikanbotClean(match[1])
+	}
+	if meta.Title == "" {
+		return meta, errors.New("爱看机器人详情缺少视频名称")
+	}
+	if match := reIkanbotCoverImg.FindStringSubmatch(body); len(match) > 1 {
+		meta.Cover = ikanbotFixURL(match[1])
+	}
+	if meta.Cover == "" {
+		if match := reIkanbotImgData.FindStringSubmatch(body); len(match) > 1 {
+			meta.Cover = ikanbotFixURL(match[1])
+		}
+	}
+	if match := reIkanbotCurrentID.FindStringSubmatch(body); len(match) > 1 {
+		if value := strings.TrimSpace(match[1]); value != "" {
+			meta.CurrentID = value
+		}
+	}
+	if match := reIkanbotToken.FindStringSubmatch(body); len(match) > 1 {
+		meta.Token = strings.TrimSpace(match[1])
+	}
+	if match := reIkanbotMType.FindStringSubmatch(body); len(match) > 1 {
+		if value := strings.TrimSpace(match[1]); value != "" {
+			meta.MType = value
+		}
+	}
+	if meta.CurrentID == "" || meta.Token == "" {
+		return meta, errors.New("爱看机器人缺少播放令牌，请刷新页面重试")
+	}
+	texts := []string{}
+	for _, match := range reIkanbotMetaText.FindAllStringSubmatch(body, -1) {
+		if value := ikanbotClean(match[1]); value != "" {
+			texts = append(texts, value)
+		}
+	}
+	meta.Desc = strings.Join(texts, " · ")
+	for _, value := range texts {
+		if meta.Year == "" && strings.HasPrefix(value, reIkanbotYear.FindString(value)) && len(value) <= 12 {
+			meta.Year = value
+			continue
+		}
+		if meta.Actors == "" && strings.Contains(value, "/") {
+			meta.Actors = value
+			continue
+		}
+		if meta.Region == "" && !strings.Contains(value, "/") && value != "" {
+			meta.Region = value
+		}
+	}
+	return meta, nil
 }
 
 func (d *Downloader) fetchIkanbotDetail(ctx context.Context, sourceID string) (Drama, []Chapter, error) {
@@ -451,107 +699,47 @@ func (d *Downloader) fetchIkanbotDetail(ctx context.Context, sourceID string) (D
 	if err != nil {
 		return Drama{}, nil, err
 	}
-	name := ""
-	if match := reIkanbotTitle.FindStringSubmatch(body); len(match) > 1 {
-		name = ikanbotClean(match[1])
-	}
-	if name == "" {
-		return Drama{}, nil, errors.New("爱看机器人详情缺少视频名称")
-	}
-	cover := ""
-	if match := reIkanbotCoverImg.FindStringSubmatch(body); len(match) > 1 {
-		cover = ikanbotFixURL(match[1])
-	}
-	if cover == "" {
-		if match := reIkanbotImgData.FindStringSubmatch(body); len(match) > 1 {
-			cover = ikanbotFixURL(match[1])
-		}
-	}
-	currentID := sourceID
-	token := ""
-	mType := "1"
-	if match := reIkanbotCurrentID.FindStringSubmatch(body); len(match) > 1 {
-		currentID = strings.TrimSpace(match[1])
-	}
-	if match := reIkanbotToken.FindStringSubmatch(body); len(match) > 1 {
-		token = strings.TrimSpace(match[1])
-	}
-	if match := reIkanbotMType.FindStringSubmatch(body); len(match) > 1 {
-		if value := strings.TrimSpace(match[1]); value != "" {
-			mType = value
-		}
-	}
-	if currentID == "" || token == "" {
-		return Drama{}, nil, errors.New("爱看机器人缺少播放令牌，请刷新页面重试")
-	}
-
-	meta := []string{}
-	for _, match := range reIkanbotMetaText.FindAllStringSubmatch(body, -1) {
-		value := ikanbotClean(match[1])
-		if value != "" {
-			meta = append(meta, value)
-		}
-	}
-	description := strings.Join(meta, " · ")
-	year := ""
-	region := ""
-	actors := ""
-	for _, value := range meta {
-		if year == "" && strings.HasPrefix(value, reIkanbotYear.FindString(value)) && len(value) <= 12 {
-			year = value
-			continue
-		}
-		if actors == "" && strings.Contains(value, "/") {
-			actors = value
-			continue
-		}
-		if region == "" && !strings.Contains(value, "/") && value != "" {
-			region = value
-		}
-	}
-
-	drama := Drama{
-		ID: providerDramaID(sourceIkanbot, sourceID), Source: sourceIkanbot, SourceID: sourceID,
-		Title: truncate(name, 512), Name: truncate(name, 512),
-		Desc: truncate(description, 12000), Intro: truncate(description, 12000),
-		Cover: cover, CoverURL: cover, ChannelName: "爱看机器人",
-		OnlineDate: truncate(year, 32),
-	}
-
-	lines, err := d.ikanbotLines(ctx, sourceID, currentID, token, mType)
+	page, err := parseIkanbotPlayPage(body, sourceID)
 	if err != nil {
 		return Drama{}, nil, err
 	}
+	drama := Drama{
+		ID: providerDramaID(sourceIkanbot, sourceID), Source: sourceIkanbot, SourceID: sourceID,
+		Title: truncate(page.Title, 512), Name: truncate(page.Title, 512),
+		Desc: truncate(page.Desc, 12000), Intro: truncate(page.Desc, 12000),
+		Cover: page.Cover, CoverURL: page.Cover, ChannelName: "爱看机器人",
+		OnlineDate: truncate(page.Year, 32),
+	}
+
+	lines, err := d.ikanbotLines(ctx, sourceID, &page)
+	if err != nil {
+		return Drama{}, nil, err
+	}
+	primary := lines[0]
 
 	chapters := []Chapter{}
-	seen := map[string]bool{}
-	for _, line := range lines {
-		for _, pair := range ikanbotSplitEpisodes(line.URL) {
-			episodeName := ikanbotClean(pair[0])
-			address := ikanbotFixMediaURL(pair[1])
-			if address == "" || seen[address] {
-				continue
-			}
-			seen[address] = true
-			order := len(chapters) + 1
-			if number := reIkanbotEpisodeNo.FindString(episodeName); number != "" {
-				if parsed, err := strconv.Atoi(number); err == nil && parsed > 0 && parsed <= 100000 {
-					order = parsed
-				}
-			}
-			if episodeName == "" {
-				episodeName = fmt.Sprintf("第 %d 集", order)
-			}
-			chapters = append(chapters, Chapter{
-				ID:             providerChapterID(sourceIkanbot, sourceID, address),
-				Source:         sourceIkanbot,
-				Title:          truncate(episodeName, 128),
-				CurrentEpisode: rawEpisode(order),
-				VideoURL:       address,
-				PageURL:        fmt.Sprintf("%s/play/%s", strings.TrimRight(d.providerBaseURL(sourceIkanbot), "/"), sourceID),
-				Referer:        strings.TrimRight(d.providerBaseURL(sourceIkanbot), "/") + "/",
-			})
+	pageURL := fmt.Sprintf("%s/play/%s", strings.TrimRight(d.providerBaseURL(sourceIkanbot), "/"), sourceID)
+	referer := strings.TrimRight(d.providerBaseURL(sourceIkanbot), "/") + "/"
+	for _, episode := range primary.Episodes {
+		order := episode.Order
+		if order < 1 {
+			order = len(chapters) + 1
 		}
+		title := episode.Name
+		if title == "" {
+			title = fmt.Sprintf("第 %d 集", order)
+		}
+		chapters = append(chapters, Chapter{
+			// 分集 ID 用集号而不是地址：同一集在各线路上地址不同，
+			// 播放时再按集号把每条线路的地址取出来供切换。
+			ID:             providerChapterID(sourceIkanbot, sourceID, strconv.Itoa(order)),
+			Source:         sourceIkanbot,
+			Title:          truncate(title, 128),
+			CurrentEpisode: rawEpisode(order),
+			VideoURL:       episode.URL,
+			PageURL:        pageURL,
+			Referer:        referer,
+		})
 	}
 	if len(chapters) == 0 {
 		return Drama{}, nil, errors.New("爱看机器人暂无可播放分集")
@@ -562,11 +750,11 @@ func (d *Downloader) fetchIkanbotDetail(ctx context.Context, sourceID string) (D
 		return left < right
 	})
 	drama.TotalEpisode, drama.EpisodeCount = len(chapters), len(chapters)
-	if actors != "" {
-		drama.Tags = append(drama.Tags, truncate(actors, 64))
+	if page.Actors != "" {
+		drama.Tags = append(drama.Tags, truncate(page.Actors, 64))
 	}
-	if region != "" {
-		drama.Tags = append(drama.Tags, truncate(region, 32))
+	if page.Region != "" {
+		drama.Tags = append(drama.Tags, truncate(page.Region, 32))
 	}
 	return drama, chapters, nil
 }
@@ -609,16 +797,36 @@ func (d *Downloader) resolveIkanbotMedia(ctx context.Context, task Task) (provid
 	if !valid || source != sourceIkanbot || !ikanbotNumericID(sourceID) || !strings.HasPrefix(task.Chapter.ID, prefix) {
 		return providerMedia{}, errors.New("爱看机器人播放分集信息无效，请刷新详情")
 	}
-	address := strings.TrimPrefix(task.Chapter.ID, prefix)
-	if address == "" {
-		address = task.Chapter.VideoURL
-	}
-	if ikanbotFixMediaURL(address) == "" {
-		return providerMedia{}, errors.New("爱看机器人播放地址无效")
-	}
+	payload := strings.TrimSpace(strings.TrimPrefix(task.Chapter.ID, prefix))
 	referer := firstNonEmpty(task.Chapter.Referer, d.providerBaseURL(sourceIkanbot)+"/")
-	media := providerMedia{URL: address, Referer: referer}
-	if strings.HasSuffix(strings.ToLower(address), ".m3u8") {
+
+	// 分集 ID 记的是集号，按集号把每条线路的这一集都取出来，供播放器切换线路。
+	options := []providerMedia{}
+	lineErr := error(nil)
+	if order, err := strconv.Atoi(payload); err == nil && order > 0 && order <= 100000 {
+		var lines []ikanbotLine
+		lines, lineErr = d.ikanbotLines(ctx, sourceID, nil)
+		if lineErr == nil {
+			options = ikanbotEpisodeOptions(lines, order, referer)
+		}
+	}
+	// 兜底：旧格式的分集 ID（直接存地址）或线路接口临时失败时，用详情里的地址先播起来。
+	if len(options) == 0 {
+		if address := ikanbotFixMediaURL(payload); address != "" {
+			options = append(options, providerMedia{URL: address, Referer: referer})
+		} else if address := ikanbotFixMediaURL(task.Chapter.VideoURL); address != "" {
+			options = append(options, providerMedia{URL: address, Referer: referer})
+		}
+	}
+	if len(options) == 0 {
+		if lineErr != nil {
+			return providerMedia{}, lineErr
+		}
+		return providerMedia{}, errors.New("爱看机器人该集没有可用线路，请刷新详情")
+	}
+	media := options[0]
+	media.Variants = options
+	if strings.HasSuffix(strings.ToLower(media.URL), ".m3u8") {
 		return d.prepareWebProviderMedia(ctx, media, "爱看机器人")
 	}
 	return media, nil

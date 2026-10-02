@@ -51,6 +51,8 @@ type Downloader struct {
 	client                *http.Client
 	huangdouDetails       map[string]huangdouDetailEntry
 	huangdouDetailPending map[string]*huangdouDetailCall
+	ikanbotLineCache      map[string]ikanbotLineEntry
+	ikanbotLinePending    map[string]*ikanbotLineCall
 	providerMu            sync.Mutex
 	providerHosts         map[string]string
 	limiter               *requestLimiter
