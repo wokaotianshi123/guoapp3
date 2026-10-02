@@ -1,15 +1,14 @@
-import tempfile
 import unittest
 from pathlib import Path
 
+from _testkit import make_temp_dir, remove_tree
 from sync_source import REQUIRED_FILES, synchronize
 
 
 class SourceSyncTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='duanju-source-sync-')
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(make_temp_dir(prefix='duanju-source-sync-'))
+        self.addCleanup(remove_tree, self.root)
         self.source = self.root / '源码'
         self.destination = self.root / 'guoapp'
         for name in REQUIRED_FILES:

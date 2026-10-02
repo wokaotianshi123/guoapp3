@@ -1,16 +1,15 @@
-import tempfile
 import unittest
 from pathlib import Path
 
+from _testkit import make_temp_dir, remove_tree
 from finish_task import finish_task, git
 from sync_source import REQUIRED_FILES, synchronize
 
 
 class TaskSnapshotTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='duanju-snapshot-test-')
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(make_temp_dir(prefix='duanju-snapshot-test-'))
+        self.addCleanup(remove_tree, self.root)
         self.source = self.root / '源码'
         self.destination = self.root / 'guoapp'
         for name in REQUIRED_FILES:
@@ -18,6 +17,9 @@ class TaskSnapshotTests(unittest.TestCase):
         self.write(self.source / 'pubspec.yaml', 'name: synthetic_app\nversion: 0.1.3+4\n')
         self.destination.mkdir()
         git(self.destination, 'init', '--initial-branch=main')
+        # 关闭后台 gc，免得清理临时目录时 git 还在往 .git 里写文件。
+        git(self.destination, 'config', 'gc.auto', '0')
+        git(self.destination, 'config', 'maintenance.auto', 'false')
         git(self.destination, 'config', 'user.name', 'Snapshot Test')
         git(self.destination, 'config', 'user.email', 'snapshot@example.test')
 

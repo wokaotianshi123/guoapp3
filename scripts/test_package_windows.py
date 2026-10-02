@@ -1,19 +1,18 @@
 import subprocess
-import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
 
+from _testkit import make_temp_dir, remove_tree
 from app_build import BuildVariant
 from package_windows import find_inno_compiler, package_windows
 
 
 class WindowsPackageTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix='windows-package-')
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name) / 'synthetic project'
+        self.root = Path(make_temp_dir(prefix='windows-package-')) / 'synthetic project'
+        self.addCleanup(remove_tree, self.root.parent)
         self.bundle = self.root / 'build/windows/x64/runner/Release'
         self.output = self.root / 'dist/windows'
         self.files = {
