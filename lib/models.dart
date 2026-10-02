@@ -29,6 +29,7 @@ class SourceSite {
       id == 'sorani' ||
       id == 'guipian' ||
       id == 'hanxiaoquan' ||
+      id == 'ikanbot' ||
       duanjuPaged;
   bool get duanjuPaged => const {
     'yaguo',
@@ -57,6 +58,11 @@ class SourceSite {
   static const dsd = SourceSite('dsd', '帝果', '分类视频 · 在线搜索');
   static const sorani = SourceSite('sorani', '青空', '番剧 · 剧场动画 · 特摄');
   static const guipian = SourceSite('guipian', '鬼片', '鬼片 · 电视剧 · 动漫');
+  static const ikanbot = SourceSite(
+    'ikanbot',
+    '爱看机器人',
+    '电影 · 剧集 · 多线路搜索',
+  );
   static const hanxiaoquan = SourceSite(
     'hanxiaoquan',
     '韩小圈',
@@ -78,6 +84,7 @@ class SourceSite {
   ];
   static const knownValues = [
     hongguo,
+    ikanbot,
     hanxiaoquan,
     guipian,
     sorani,
@@ -92,6 +99,7 @@ class SourceSite {
   ];
   static const allValues = [
     hongguo,
+    ikanbot,
     hanxiaoquan,
     guipian,
     sorani,
