@@ -44,3 +44,7 @@ macos/Flutter/Generated.xcconfig
 macos/Flutter/flutter_export_environment.sh
 macos/Runner/GeneratedPluginRegistrant.*
 macos/Signing/
+
+# 本地 go build ./server 产生的可执行文件
+native/server.exe
+native/server.exe~
