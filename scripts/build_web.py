@@ -108,6 +108,15 @@ def readme(name, slug):
         '  数据保存在本目录下的 ' + slug + '-data，直接删除即可清空缓存。',
         '  关闭终端窗口或按 Ctrl+C 即停止服务。',
         '',
+        '关于 ffmpeg（可选，但强烈建议）：',
+        '  红果等站源的视频是加密的 H.265，浏览器既不能解密也不能解码，',
+        '  必须由服务端调用 ffmpeg 解密并转码成 H.264 才能播放。',
+        '  安装后放在本目录，或加入 PATH，重启服务即可自动启用：',
+        '    Windows：winget install ffmpeg',
+        '    macOS：brew install ffmpeg',
+        '    Linux：apt install ffmpeg / yum install ffmpeg',
+        '  未安装时其余站源仍可正常播放；启动信息里会写明是否检测到 ffmpeg。',
+        '',
     ])
 
 
