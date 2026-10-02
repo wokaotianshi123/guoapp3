@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"io/fs"
 	"log"
@@ -20,10 +23,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"duanjuapp/native/core"
+
+	_ "github.com/nathanstitt/omnidoc/pkg/heif"
 )
 
 var (
@@ -46,6 +52,7 @@ var mediaPort atomic.Value
 
 var localMediaAddress = regexp.MustCompile(`http://(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)/`)
 
+// 与 lib/models.dart 的 allValues 保持同一顺序，名称与 Flutter 端一致。
 var sourceNames = []struct {
 	ID   string
 	Name string
@@ -61,6 +68,18 @@ var sourceNames = []struct {
 	{"huangguo-video", "黄果视频"},
 	{"huangguoai", "黄果 AI"},
 	{"cloudfront", "黄果旧版"},
+	{"yaguo", "芽果"},
+	{"maoguo", "猫果"},
+	{"fanguo", "饭果"},
+	{"guanguo", "观果"},
+	{"heguo", "河果"},
+	{"xingguo", "星果"},
+	{"huaguo", "花果"},
+	{"niuguo", "牛果"},
+	{"wangguo", "网果"},
+	{"faguo", "发果"},
+	{"piguo", "皮果"},
+	{"wuguo", "伍果"},
 }
 
 var lastSequence atomic.Int64
@@ -175,40 +194,123 @@ func handleMedia(writer http.ResponseWriter, request *http.Request) {
 	proxy.ServeHTTP(writer, request)
 }
 
-func handleImage(writer http.ResponseWriter, request *http.Request) {
-	target := strings.TrimSpace(request.URL.Query().Get("url"))
-	parsed, err := url.Parse(target)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		http.Error(writer, "图片地址无效", http.StatusBadRequest)
-		return
+// 封面转换串行执行：单张转换只需几十毫秒，串行足以撑住本地页面的并发。
+var coverConvert sync.Mutex
+
+// convertHEIC 把核心缓存的 HEIC 封面转码为浏览器可显示的 JPEG，
+// 结果与 Flutter 端 CoverDecoder 一样缓存在 covers 目录的 compatible-v1 下。
+func convertHEIC(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errors.New("封面缓存文件不存在")
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
-	outgoing, err := http.NewRequestWithContext(request.Context(), http.MethodGet, target, nil)
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	directory := filepath.Join(filepath.Dir(path), "compatible-v1")
+	target := filepath.Join(directory, fmt.Sprintf("%s-%d-%d.jpg", base, info.ModTime().UnixNano(), info.Size()))
+	if stat, err := os.Stat(target); err == nil && stat.Mode().IsRegular() && stat.Size() > 4 {
+		return target, nil
+	}
+	coverConvert.Lock()
+	defer coverConvert.Unlock()
+	if stat, err := os.Stat(target); err == nil && stat.Mode().IsRegular() && stat.Size() > 4 {
+		return target, nil
+	}
+	source, err := os.Open(path)
 	if err != nil {
-		http.Error(writer, "图片请求无效", http.StatusBadRequest)
-		return
+		return "", err
 	}
-	outgoing.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-	if referer := request.URL.Query().Get("referer"); referer != "" {
-		outgoing.Header.Set("Referer", referer)
-	}
-	response, err := client.Do(outgoing)
+	defer source.Close()
+	// 解码器遇到异常数据可能 panic，兜底成普通错误让页面回退到占位图。
+	defer func() {
+		if recover() != nil {
+			err = errors.New("封面解码失败")
+		}
+	}()
+	decoded, _, err := image.Decode(source)
 	if err != nil {
-		http.Error(writer, "图片获取失败", http.StatusBadGateway)
+		return "", err
+	}
+	buffered := new(bytes.Buffer)
+	if err := jpeg.Encode(buffered, decoded, &jpeg.Options{Quality: 82}); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return "", err
+	}
+	part := target + ".part"
+	if err := os.WriteFile(part, buffered.Bytes(), 0o644); err != nil {
+		return "", err
+	}
+	if err := os.Rename(part, target); err != nil {
+		_ = os.Remove(part)
+		return "", err
+	}
+	return target, nil
+}
+
+func handleCover(writer http.ResponseWriter, request *http.Request) {
+	id := strings.TrimSpace(request.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(writer, "缺少剧集 id", http.StatusBadRequest)
 		return
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		http.Error(writer, "图片获取失败", http.StatusBadGateway)
+	drama := map[string]any{"id": id}
+	if source := strings.TrimSpace(request.URL.Query().Get("source")); source != "" {
+		drama["source"] = source
+	}
+	if cover := strings.TrimSpace(request.URL.Query().Get("u")); cover != "" {
+		parsed, err := url.Parse(cover)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			http.Error(writer, "封面地址无效", http.StatusBadRequest)
+			return
+		}
+		drama["cover"] = cover
+	}
+	encoded, err := json.Marshal(map[string]any{"action": "cover", "drama": drama})
+	if err != nil {
+		http.Error(writer, "请求编码失败", http.StatusInternalServerError)
 		return
 	}
-	contentType := response.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "image/") {
-		contentType = "image/jpeg"
+	reply := struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Path string `json:"path"`
+			HEIC bool   `json:"heic"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}{}
+	if err := json.Unmarshal([]byte(core.NativeRequest(string(encoded))), &reply); err != nil || !reply.OK || reply.Data.Path == "" {
+		http.Error(writer, "封面暂不可用", http.StatusNotFound)
+		return
+	}
+	path := reply.Data.Path
+	if reply.Data.HEIC {
+		converted, err := convertHEIC(path)
+		if err == nil {
+			path = converted
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		http.Error(writer, "封面暂不可用", http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	head := make([]byte, 512)
+	count, _ := io.ReadFull(file, head)
+	contentType := "application/octet-stream"
+	if count > 0 {
+		if detected := http.DetectContentType(head[:count]); detected != "" {
+			contentType = detected
+		}
 	}
 	writer.Header().Set("Content-Type", contentType)
 	writer.Header().Set("Cache-Control", "public, max-age=86400")
-	_, _ = io.Copy(writer, io.LimitReader(response.Body, 32<<20))
+	if _, err := file.Seek(0, io.SeekStart); err == nil {
+		_, _ = io.Copy(writer, file)
+	} else {
+		_, _ = writer.Write(head[:count])
+	}
 }
 
 func handleSources(writer http.ResponseWriter, request *http.Request) {
@@ -281,6 +383,12 @@ func main() {
 			directory = filepath.Join(".", editionSlug+"-data")
 		}
 	}
+	// 核心要求数据目录是绝对路径，-data 传相对路径时先归一化。
+	if !filepath.IsAbs(directory) {
+		if absolute, err := filepath.Abs(directory); err == nil {
+			directory = absolute
+		}
+	}
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		log.Fatalf("无法创建数据目录 %s：%v", directory, err)
 	}
@@ -307,7 +415,7 @@ func main() {
 	mux.Handle("/web/", http.StripPrefix("/web/", http.FileServer(http.FS(site))))
 	mux.HandleFunc("/api/request", handleRequest)
 	mux.HandleFunc("/api/media/", handleMedia)
-	mux.HandleFunc("/api/ui/image", handleImage)
+	mux.HandleFunc("/api/cover", handleCover)
 	mux.HandleFunc("/api/sources", handleSources)
 	mux.HandleFunc("/api/info", func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, map[string]any{

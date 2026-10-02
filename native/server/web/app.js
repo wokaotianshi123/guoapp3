@@ -44,24 +44,29 @@ function api(payload) {
     });
 }
 
-function coverURL(drama) {
-  var cover = drama && drama.cover ? String(drama.cover) : '';
-  if (!cover) {
+function coverSrc(drama) {
+  if (!drama || !drama.id) {
     return '';
   }
-  if (cover.indexOf('http://') === 0 || cover.indexOf('https://') === 0 || cover.indexOf('/') === 0) {
-    return cover;
+  var query = new URLSearchParams();
+  query.set('id', drama.id);
+  if (drama.source) {
+    query.set('source', String(drama.source));
   }
-  return '';
+  var cover = drama.cover ? String(drama.cover) : '';
+  if (/^https?:\/\//i.test(cover)) {
+    query.set('u', cover);
+  }
+  return '/api/cover?' + query.toString();
 }
 
 function coverHTML(drama) {
-  var url = coverURL(drama);
+  var url = coverSrc(drama);
   if (!url) {
     return '<div class="cover"><div class="fallback">' + escapeHTML(drama.title || '无封面') + '</div></div>';
   }
   return (
-    '<div class="cover"><img loading="lazy" referrerpolicy="no-referrer" src="' +
+    '<div class="cover"><img loading="lazy" src="' +
     escapeHTML(url) +
     '" alt="" onerror="this.style.display=\'none\'" /></div>'
   );
@@ -256,16 +261,53 @@ function stopPlayback() {
   state.plan = null;
 }
 
+// 红果等站源的视频是 H.265/HEVC 编码，浏览器能否直接播放取决于平台解码器。
+function hevcSupported() {
+  try {
+    var video = document.createElement('video');
+    return !!(
+      video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') ||
+      video.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"')
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+var HEVC_NOTICE =
+  '该视频采用 H.265/HEVC 编码，当前浏览器无法解码。' +
+  '建议改用 Safari / Edge 浏览器；Windows 用户可在"设置 → 应用 → 可选功能"中安装' +
+  '"HEVC 视频扩展"后重试；也可以稍后在手机端打开本页播放。';
+
+function showNotice(message) {
+  var box = document.getElementById('play-note');
+  if (!box) {
+    return;
+  }
+  box.textContent = message;
+  box.style.display = 'block';
+}
+
 function mountVideo(url) {
   var video = document.getElementById('player');
   if (hlsInstance) {
     hlsInstance.destroy();
     hlsInstance = null;
   }
-  if (url.indexOf('.m3u8') !== -1 && window.Hls && window.Hls.isSupported()) {
+  video.onerror = function () {
+    if (/\.mp4($|\?)/i.test(url) && !hevcSupported()) {
+      showNotice(HEVC_NOTICE);
+    } else {
+      showNotice('视频加载失败，请点"换线路"重试。');
+    }
+  };
+  var isPlaylist = /\.m3u8($|\?)/i.test(url);
+  if (isPlaylist && window.Hls && window.Hls.isSupported()) {
     hlsInstance = new window.Hls({ enableWorker: true });
     hlsInstance.loadSource(url);
     hlsInstance.attachMedia(video);
+  } else if (isPlaylist && video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = url;
   } else {
     video.src = url;
   }
@@ -313,15 +355,24 @@ function renderPlay(id, index) {
       var next = index + 1 < (state.chapters || []).length
         ? '<a class="btn" href="#/play?id=' + encodeURIComponent(id) + '&index=' + (index + 1) + '">下一集</a>'
         : '';
+      var previous = index > 0
+        ? '<a class="btn" href="#/play?id=' + encodeURIComponent(id) + '&index=' + (index - 1) + '">上一集</a>'
+        : '';
+      // 红果等站源固定输出 H.265/HEVC，浏览器缺解码器时提前告知，而不是只留一个黑屏。
+      var notice = /\.mp4($|\?)/i.test(plan.url || '') && !hevcSupported()
+        ? '<div class="notice" id="play-note" style="display:block">' + escapeHTML(HEVC_NOTICE) + '</div>'
+        : '<div class="notice" id="play-note" style="display:none"></div>';
       view.innerHTML =
         '<div class="player-wrap">' +
         '<div class="player-title">' +
         escapeHTML(state.drama.title) + ' · ' + escapeHTML(((state.chapters || [])[index] || {}).title || '') +
         '</div>' +
         '<video id="player" controls autoplay playsinline></video>' +
+        notice +
         '<div class="player-bar">' + qualityButtons + routes +
         '<span class="spacer"></span>' +
         '<a class="btn" href="#/drama?id=' + encodeURIComponent(id) + '">返回详情</a>' +
+        previous +
         next +
         '</div></div>';
       mountVideo(plan.url);
