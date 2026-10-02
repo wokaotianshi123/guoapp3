@@ -58,6 +58,7 @@ var sourceNames = []struct {
 	Name string
 }{
 	{"hongguo", "红果"},
+	{"ikanbot", "爱看机器人"},
 	{"hanxiaoquan", "韩小圈"},
 	{"guipian", "鬼片"},
 	{"sorani", "青空"},
