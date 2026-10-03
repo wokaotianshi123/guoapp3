@@ -549,18 +549,142 @@ func handleCover(writer http.ResponseWriter, request *http.Request) {
 func handleSources(writer http.ResponseWriter, request *http.Request) {
 	items := []map[string]string{}
 	for _, source := range sourceNames {
-		encoded, err := json.Marshal(map[string]any{"action": "sourceStatus", "source": source.ID})
-		if err != nil {
-			continue
-		}
-		answer := struct {
-			OK bool `json:"ok"`
-		}{}
-		if json.Unmarshal([]byte(core.NativeRequest(string(encoded))), &answer) == nil && answer.OK {
+		if sourceAvailable(source.ID) {
 			items = append(items, map[string]string{"id": source.ID, "name": source.Name})
 		}
 	}
+	// 并入用户自定义的 maccms 站源，使其出现在站源下拉框。
+	reply := struct {
+		Items []map[string]string `json:"items"`
+	}{}
+	if json.Unmarshal([]byte(core.NativeRequest(`{"action":"customSources"}`)), &reply) == nil {
+		for _, custom := range reply.Items {
+			if sourceAvailable(custom["id"]) {
+				items = append(items, map[string]string{"id": custom["id"], "name": custom["name"]})
+			}
+		}
+	}
 	writeJSON(writer, map[string]any{"items": items})
+}
+
+func sourceAvailable(source string) bool {
+	encoded, err := json.Marshal(map[string]any{"action": "sourceStatus", "source": source})
+	if err != nil {
+		return false
+	}
+	answer := struct {
+		OK bool `json:"ok"`
+	}{}
+	return json.Unmarshal([]byte(core.NativeRequest(string(encoded))), &answer) == nil && answer.OK
+}
+
+// customSourceRecords 返回引擎中全部自定义 maccms 站源。
+func customSourceRecords() []map[string]any {
+	reply := struct {
+		Items []map[string]any `json:"items"`
+	}{}
+	if json.Unmarshal([]byte(core.NativeRequest(`{"action":"customSources"}`)), &reply) != nil {
+		return []map[string]any{}
+	}
+	return reply.Items
+}
+
+// customSourceAction 新增或更新自定义源，成功返回解析后的记录。
+func customSourceAction(action, id, name, base string) (map[string]any, bool) {
+	payload := map[string]any{"action": action, "name": name, "base": base}
+	if id != "" {
+		payload["source"] = id
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	reply := map[string]any{}
+	if json.Unmarshal([]byte(core.NativeRequest(string(encoded))), &reply) != nil {
+		return nil, false
+	}
+	if reply["id"] == nil {
+		return nil, false
+	}
+	return reply, true
+}
+
+func customSourceDelete(id string) bool {
+	reply := struct {
+		OK bool `json:"ok"`
+	}{}
+	return json.Unmarshal([]byte(core.NativeRequest(`{"action":"removeCustomSource","source":`+quoteJSON(id)+`}`)), &reply) == nil && reply.OK
+}
+
+func quoteJSON(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+// 自定义 maccms 源管理：GET 列表 / POST 新增 / PUT {id} 更新 / DELETE {id} 删除。
+func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet:
+		writeJSON(writer, map[string]any{"items": customSourceRecords()})
+		return
+	case http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+		if err != nil {
+			http.Error(writer, "读取请求失败", http.StatusBadRequest)
+			return
+		}
+		payload := struct {
+			Name string `json:"name"`
+			Base string `json:"base"`
+		}{}
+		if json.Unmarshal(body, &payload) != nil {
+			http.Error(writer, "请求不是合法 JSON", http.StatusBadRequest)
+			return
+		}
+		record, ok := customSourceAction("addCustomSource", "", payload.Name, payload.Base)
+		if !ok {
+			http.Error(writer, "新增自定义源失败", http.StatusBadRequest)
+			return
+		}
+		writeJSON(writer, record)
+		return
+	}
+	id := strings.TrimPrefix(strings.TrimSuffix(request.URL.Path, "/"), "/api/custom-sources/")
+	if id == "" {
+		http.Error(writer, "缺少自定义源标识", http.StatusBadRequest)
+		return
+	}
+	switch request.Method {
+	case http.MethodPut:
+		body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+		if err != nil {
+			http.Error(writer, "读取请求失败", http.StatusBadRequest)
+			return
+		}
+		payload := struct {
+			Name string `json:"name"`
+			Base string `json:"base"`
+		}{}
+		if json.Unmarshal(body, &payload) != nil {
+			http.Error(writer, "请求不是合法 JSON", http.StatusBadRequest)
+			return
+		}
+		record, ok := customSourceAction("updateCustomSource", id, payload.Name, payload.Base)
+		if !ok {
+			http.Error(writer, "更新自定义源失败", http.StatusBadRequest)
+			return
+		}
+		writeJSON(writer, record)
+		return
+	case http.MethodDelete:
+		if !customSourceDelete(id) {
+			http.Error(writer, "删除自定义源失败", http.StatusBadRequest)
+			return
+		}
+		writeJSON(writer, map[string]any{"ok": true})
+		return
+	}
+	http.Error(writer, "不支持的方法", http.StatusMethodNotAllowed)
 }
 
 func lanAddresses(port int) []string {
@@ -654,6 +778,8 @@ func main() {
 	mux.HandleFunc("/api/live/", handleLive)
 	mux.HandleFunc("/api/cover", handleCover)
 	mux.HandleFunc("/api/sources", handleSources)
+	mux.HandleFunc("/api/custom-sources", handleCustomSources)
+	mux.HandleFunc("/api/custom-sources/", handleCustomSources)
 	mux.HandleFunc("/api/library", handleLibrary)
 	mux.HandleFunc("/api/info", func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, map[string]any{

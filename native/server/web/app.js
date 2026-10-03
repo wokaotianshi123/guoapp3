@@ -1252,6 +1252,187 @@ function renderFavorites(tab) {
   });
 }
 
+// —— 自定义 maccms 源管理 ——
+
+function customSourceList() {
+  return fetch('/api/custom-sources')
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      return (data && data.items) || [];
+    });
+}
+
+function customSourceSave(record, editing) {
+  return fetch('/api/custom-sources' + (editing ? '/' + encodeURIComponent(record.id) : ''), {
+    method: editing ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: record.name, base: record.base }),
+  }).then(function (response) {
+    return response.json().then(function (data) {
+      if (!data || !data.id) {
+        throw new Error(data && data.error ? data.error : '保存自定义源失败');
+      }
+      return data;
+    });
+  });
+}
+
+function customSourceRemove(id) {
+  return fetch('/api/custom-sources/' + encodeURIComponent(id), { method: 'DELETE' })
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      if (!data || data.ok !== true) {
+        throw new Error(data && data.error ? data.error : '删除自定义源失败');
+      }
+      return data;
+    });
+}
+
+function renderCustomSources() {
+  return customSourceList().then(function (items) {
+    var rows = items.map(function (item) {
+      return (
+        '<div class="lib-tab custom-row" style="display:flex;align-items:center;justify-content:space-between;border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin:6px 0;cursor:default">' +
+        '<div style="min-width:0">' +
+        '<div style="font-weight:600">' + escapeHTML(item.name || '') + '</div>' +
+        '<div style="font-size:12px;opacity:0.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+        escapeHTML(item.base || '') + '</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px;flex:none">' +
+        '<button type="button" class="btn" data-edit="' + escapeHTML(item.id) + '">编辑</button>' +
+        '<button type="button" class="btn danger" data-remove="' + escapeHTML(item.id) + '" data-name="' +
+        escapeHTML(item.name || '') + '">删除</button>' +
+        '</div>' +
+        '</div>'
+      );
+    }).join('');
+    if (!rows) {
+      rows = '<div class="empty">还没有自定义源。填入符合 MacCMS 规范的站点名称与网址，即可自动适配列表与播放。</div>';
+    }
+    view.innerHTML =
+      '<div class="lib">' +
+      '<div class="lib-tabs">' +
+      '<span class="lib-tab active">自定义源（' + items.length + '）</span>' +
+      '<span class="spacer"></span>' +
+      '<button type="button" class="btn" id="custom-add">新增</button>' +
+      '</div>' +
+      '<div style="font-size:12px;opacity:0.7;padding:4px 2px 8px">' +
+      '自定义源读取网址并判断是否符合 MacCMS 规范；符合后套用通用规则自动完成列表、搜索与播放。</div>' +
+      rows +
+      '</div>';
+    bindCustomSourcesView(items);
+  });
+}
+
+function bindCustomSourcesView(items) {
+  var addButton = document.getElementById('custom-add');
+  if (addButton) {
+    addButton.addEventListener('click', function () {
+      openCustomSourceEditor(null);
+    });
+  }
+  Array.prototype.forEach.call(view.querySelectorAll('[data-edit]'), function (button) {
+    button.addEventListener('click', function () {
+      var id = button.getAttribute('data-edit');
+      var item = items.filter(function (entry) { return entry.id === id; })[0];
+      if (item) {
+        openCustomSourceEditor(item);
+      }
+    });
+  });
+  Array.prototype.forEach.call(view.querySelectorAll('[data-remove]'), function (button) {
+    button.addEventListener('click', function () {
+      var id = button.getAttribute('data-remove');
+      var name = button.getAttribute('data-name') || '';
+      var confirmed = window.confirm('确定删除「' + name + '」吗？已加载的剧集仍会保留在浏览器本地。');
+      if (!confirmed) {
+        return;
+      }
+      customSourceRemove(id)
+        .then(function () {
+          return Promise.all([customSourceList(), loadSources()]);
+        })
+        .then(function (results) {
+          state.sourceNames = {};
+          (results[0] || []).forEach(function (item) {
+            state.sourceNames[item.id] = item.name;
+          });
+          renderCustomSources();
+        })
+        .catch(function (error) {
+          window.alert(error.message || '删除自定义源失败');
+        });
+    });
+  });
+}
+
+function openCustomSourceEditor(existing) {
+  var overlay = document.createElement('div');
+  overlay.style.cssText =
+    'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;display:flex;align-items:center;justify-content:center';
+  var title = existing ? '编辑自定义源' : '新增自定义源';
+  overlay.innerHTML =
+    '<div style="background:var(--panel,#1e2430);border:1px solid var(--border,#333);border-radius:12px;' +
+    'width:min(440px,92vw);padding:20px;box-sizing:border-box">' +
+    '<h3 style="margin:0 0 14px">' + title + '</h3>' +
+    '<label style="display:block;font-size:12px;opacity:0.8;margin-bottom:4px">源名称</label>' +
+    '<input id="cs-name" class="search" type="text" maxlength="40" placeholder="例如：我的影院" ' +
+    'style="width:100%;margin-bottom:12px" value="' + escapeHTML(existing ? existing.name : '') + '" />' +
+    '<label style="display:block;font-size:12px;opacity:0.8;margin-bottom:4px">源网址</label>' +
+    '<input id="cs-base" class="search" type="url" placeholder="https://example.com" ' +
+    'style="width:100%" value="' + escapeHTML(existing ? existing.base : '') + '" />' +
+    '<div id="cs-error" style="color:#ff8b90;font-size:12px;min-height:18px;margin-top:8px"></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">' +
+    '<button type="button" class="btn" id="cs-cancel">取消</button>' +
+    '<button type="button" class="btn" id="cs-save">保存</button>' +
+    '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  var nameInput = document.getElementById('cs-name');
+  var baseInput = document.getElementById('cs-base');
+  var errorBox = document.getElementById('cs-error');
+  var saveButton = document.getElementById('cs-save');
+  var cancelButton = document.getElementById('cs-cancel');
+  if (nameInput) nameInput.focus();
+  function close() {
+    document.body.removeChild(overlay);
+  }
+  if (cancelButton) {
+    cancelButton.addEventListener('click', close);
+  }
+  if (saveButton) {
+    saveButton.addEventListener('click', function () {
+      var name = (nameInput.value || '').trim();
+      var base = (baseInput.value || '').trim();
+      if (!name || !base) {
+        errorBox.textContent = '源名称与源网址都需要填写';
+        return;
+      }
+      saveButton.disabled = true;
+      customSourceSave({ id: existing ? existing.id : '', name: name, base: base }, !!existing)
+        .then(function () {
+          return Promise.all([customSourceList(), loadSources()]);
+        })
+        .then(function (results) {
+          state.sourceNames = {};
+          (results[0] || []).forEach(function (item) {
+            state.sourceNames[item.id] = item.name;
+          });
+          close();
+          renderCustomSources();
+        })
+        .catch(function (error) {
+          errorBox.textContent = error.message || '保存自定义源失败';
+          saveButton.disabled = false;
+        });
+    });
+  }
+}
+
 function render() {
   cancelAutoNext();
   var current = hashParams();
@@ -1268,6 +1449,10 @@ function render() {
   if (favoritesButton) {
     favoritesButton.classList.toggle('active', current.path === 'favorites');
   }
+  var customSourcesButton = document.getElementById('custom-sources-btn');
+  if (customSourcesButton) {
+    customSourcesButton.classList.toggle('active', current.path === 'custom-sources');
+  }
   var task;
   if (current.path === 'drama') {
     task = renderDrama(params.get('id') || '', params.get('source') || '');
@@ -1275,6 +1460,8 @@ function render() {
     task = renderPlay(params.get('id') || '', Number(params.get('index') || 0), params.get('source') || '');
   } else if (current.path === 'favorites') {
     task = renderFavorites(params.get('tab') || '');
+  } else if (current.path === 'custom-sources') {
+    task = Promise.resolve().then(renderCustomSources);
   } else {
     state.category = params.get('category') || '';
     state.page = Number(params.get('page') || 1);
