@@ -102,7 +102,6 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
     final sources = widget.store.customSources;
     return Scaffold(
       appBar: AppBar(
