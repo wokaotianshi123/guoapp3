@@ -82,7 +82,24 @@ func newNativeCoverCache(directory string, downloader *Downloader) *nativeCoverC
 	return cache
 }
 
+// 豆瓣图床（doubanio.com / douban.com）防盗链严格：实测无 Referer 返回 418，
+// 带第三方站点的 Referer（如爱看机器人封面）返回 403，只有豆瓣自己的页面才放行。
+// 封面只要存放在豆瓣图床，无论来自哪个站源都改用豆瓣 Referer。
+func nativeDoubanCoverReferer(parsed *url.URL) (string, bool) {
+	host := strings.ToLower(parsed.Hostname())
+	if strings.HasSuffix(host, ".doubanio.com") || host == "doubanio.com" ||
+		strings.HasSuffix(host, ".douban.com") || host == "douban.com" {
+		return "https://movie.douban.com/", true
+	}
+	return "", false
+}
+
 func nativeCoverReferer(downloader *Downloader, source, address string) string {
+	if parsed, err := url.Parse(address); err == nil {
+		if referer, ok := nativeDoubanCoverReferer(parsed); ok {
+			return referer
+		}
+	}
 	if source == sourceCloudFront {
 		if parsed, err := url.Parse(address); err == nil && (strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".zdmhyg.cn") || strings.EqualFold(parsed.Hostname(), "pic.tuafjz.cn")) {
 			return downloader.providerBaseURL(sourceHuangguoAI) + "/"
