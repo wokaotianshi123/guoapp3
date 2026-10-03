@@ -1,0 +1,331 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import 'core_bridge.dart';
+import 'local_store.dart';
+import 'models.dart';
+import 'remote_widgets.dart';
+import 'widgets.dart';
+
+/// 自定义 MacCMS 站源管理界面。
+///
+/// 用户可新增、编辑、删除符合 MacCMS 模板的站点地址。保存后由原生核心
+/// 识别并套用通用 maccms 解析规则，完成列表展示、搜索与播放。
+class CustomSourcesScreen extends StatefulWidget {
+  const CustomSourcesScreen({
+    super.key,
+    required this.repository,
+    required this.store,
+  });
+  final AppRepository repository;
+  final LocalStore store;
+
+  @override
+  State<CustomSourcesScreen> createState() => _CustomSourcesScreenState();
+}
+
+class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    ensureTelevisionFocus(context);
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final sources = await widget.repository.customSources();
+      await widget.store.syncCustomSources(sources);
+      if (mounted) setState(() => _loading = false);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = error.toString();
+        });
+      }
+    }
+  }
+
+  Future<void> _openEditor({CustomSourceSite? existing}) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (_) => _CustomSourceEditor(
+        repository: widget.repository,
+        store: widget.store,
+        existing: existing,
+      ),
+    );
+    if (result == true && mounted) unawaited(_load());
+  }
+
+  Future<void> _remove(CustomSourceSite source) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除自定义源'),
+        content: Text('确定删除「${source.name}」吗？已加载的剧集仍会保留在设备上。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await saveUserChange(
+        context,
+        () async {
+          await widget.repository.removeCustomSource(source.id);
+          await widget.store.syncCustomSources(
+            await widget.repository.customSources(),
+          );
+        },
+      );
+      if (mounted) unawaited(_load());
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final sources = widget.store.customSources;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('自定义源'),
+        actions: [
+          IconButton(
+            key: const ValueKey('custom-source-refresh'),
+            tooltip: '刷新',
+            onPressed: _loading ? null : () => unawaited(_load()),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+          const SizedBox(width: 4),
+          FilledButton.icon(
+            key: const ValueKey('custom-source-add'),
+            onPressed: () => unawaited(_openEditor()),
+            icon: const Icon(Icons.add_rounded, size: 20),
+            label: const Text('新增'),
+          ),
+          const SizedBox(width: 12),
+        ],
+      ),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 960),
+          child: AnimatedBuilder(
+            animation: widget.store,
+            builder: (context, _) {
+              if (_error != null) {
+                return StatusPanel(
+                  title: '无法读取自定义源',
+                  message: _error!,
+                  onRetry: _load,
+                );
+              }
+              if (_loading && sources.isEmpty) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (sources.isEmpty) {
+                return const StatusPanel(
+                  title: '还没有自定义源',
+                  message: '点击右上角「新增」，填入符合 MacCMS 模板的站点名称与网址，即可自动适配列表与播放。',
+                );
+              }
+              return ListView(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 16),
+                    child: Text(
+                      '自定义源读取网站地址并判断是否符合 MacCMS 规范；符合后套用通用规则自动完成列表展示、搜索与播放。',
+                    ),
+                  ),
+                  for (final source in sources) _sourceCard(source),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sourceCard(CustomSourceSite source) {
+    final colors = Theme.of(context).colorScheme;
+    return Card(
+      key: ValueKey('custom-${source.id}'),
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        leading: const Icon(Icons.dns_outlined),
+        title: Text(source.name),
+        subtitle: Text(
+          source.base,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              tooltip: '编辑',
+              onPressed: () => unawaited(_openEditor(existing: source)),
+              icon: const Icon(Icons.edit_outlined),
+            ),
+            IconButton(
+              tooltip: '删除',
+              onPressed: () => unawaited(_remove(source)),
+              icon: Icon(Icons.delete_outline, color: colors.error),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomSourceEditor extends StatefulWidget {
+  const _CustomSourceEditor({
+    required this.repository,
+    required this.store,
+    this.existing,
+  });
+  final AppRepository repository;
+  final LocalStore store;
+  final CustomSourceSite? existing;
+
+  @override
+  State<_CustomSourceEditor> createState() => _CustomSourceEditorState();
+}
+
+class _CustomSourceEditorState extends State<_CustomSourceEditor> {
+  late final TextEditingController _name;
+  late final TextEditingController _base;
+  bool _busy = false;
+  String? _errorFixed;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.existing?.name ?? '');
+    _base = TextEditingController(text: widget.existing?.base ?? '');
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _base.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _errorFixed = null;
+    });
+    try {
+      final existing = widget.existing;
+      if (existing == null) {
+        await widget.repository.addCustomSource(
+          name: _name.text.trim(),
+          base: _base.text.trim(),
+        );
+      } else {
+        await widget.repository.updateCustomSource(
+          existing.id,
+          name: _name.text.trim(),
+          base: _base.text.trim(),
+        );
+      }
+      await widget.store.syncCustomSources(
+        await widget.repository.customSources(),
+      );
+      if (mounted) Navigator.pop(context, true);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _errorFixed = error.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.existing == null ? '新增自定义源' : '编辑自定义源'),
+      content: SizedBox(
+        width: 440,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              key: const ValueKey('custom-source-name'),
+              controller: _name,
+              enabled: !_busy,
+              maxLength: 40,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: '源名称',
+                hintText: '例如：我的影院',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('custom-source-base'),
+              controller: _base,
+              enabled: !_busy,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '源网址',
+                hintText: 'https://example.com',
+                helperText: '支持符合 MacCMS 规范的站点，自动适配目录、搜索与播放。',
+                helperMaxLines: 3,
+              ),
+            ),
+            if (_errorFixed != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  _errorFixed!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('custom-source-save'),
+          onPressed: _busy ? null : _save,
+          child: Text(_busy ? '保存中…' : '保存'),
+        ),
+      ],
+    );
+  }
+}

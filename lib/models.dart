@@ -2,6 +2,28 @@ import 'dart:convert';
 
 import 'app_build.dart';
 
+/// 用户自定义的 MacCMS 站源记录。
+class CustomSourceSite {
+  const CustomSourceSite({
+    required this.id,
+    required this.name,
+    required this.base,
+  });
+  final String id;
+  final String name;
+  final String base;
+
+  factory CustomSourceSite.fromJson(Map<String, dynamic> json) =>
+      CustomSourceSite(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        base: json['base'] as String? ?? '',
+      );
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'base': base};
+  bool get isCustom => SourceSite.isCustomId(id);
+  SourceSite get asSourceSite => SourceSite(id, name, base);
+}
+
 class SourceSite {
   const SourceSite(this.id, this.name, this.description);
   final String id;
@@ -113,10 +135,23 @@ class SourceSite {
     ...duanjuValues,
   ];
   static const values = allSourcesEnabled ? knownValues : [hongguo];
-  static bool isAvailable(String id) => values.any((site) => site.id == id);
-  static bool isKnown(String id) => allValues.any((site) => site.id == id);
-  static SourceSite byId(String id) =>
-      allValues.firstWhere((site) => site.id == id, orElse: () => hongguo);
+  /// 当前会话已注册的自定义源 ID，供可用性判断与站源归一化使用。
+  static final Set<String> customIds = {};
+  static bool isCustomId(String id) => id.startsWith('custom:');
+  static bool isAvailable(String id) =>
+      values.any((site) => site.id == id) || customIds.contains(id);
+  static bool isKnown(String id) =>
+      allValues.any((site) => site.id == id) || customIds.contains(id);
+  static SourceSite byId(String id) {
+    if (customIds.contains(id)) {
+      return SourceSite(id, customName(id), '自定义站源');
+    }
+    return allValues.firstWhere((site) => site.id == id, orElse: () => hongguo);
+  }
+  static String customName(String id) {
+    if (id.startsWith('custom:')) return '自定义源';
+    return id;
+  }
 }
 
 class SourceGroup {

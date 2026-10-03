@@ -35,8 +35,12 @@ String _nativeRequest(String body) {
     );
   } else if (Platform.isIOS) {
     library = DynamicLibrary.process();
+  } else if (Platform.isMacOS) {
+    // macOS 构建将 libduanju_core.dylib 嵌入 Contents/Frameworks，
+    // 通过 @executable_path/Frameworks 的 rpath 解析加载。
+    library = DynamicLibrary.open('libduanju_core.dylib');
   } else {
-    throw UnsupportedError('当前首版支持 Android 手机和 Windows 电脑');
+    throw UnsupportedError('当前首版支持 Android 手机、Windows 电脑和 macOS');
   }
   final request = library.lookupFunction<_NativeRequest, _DartRequest>(
     'DuanjuRequest',
@@ -126,6 +130,18 @@ abstract class AppRepository {
   }) async => throw AppFailure('当前环境不支持站源管理');
   Future<SourceStatus> cancelSourceJob(String source) async =>
       throw AppFailure('当前环境不支持站源管理');
+  Future<List<CustomSourceSite>> customSources() async => const [];
+  Future<CustomSourceSite> addCustomSource({
+    required String name,
+    required String base,
+  }) async => throw AppFailure('当前环境不支持自定义源');
+  Future<CustomSourceSite> updateCustomSource(
+    String id, {
+    required String name,
+    required String base,
+  }) async => throw AppFailure('当前环境不支持自定义源');
+  Future<void> removeCustomSource(String id) async =>
+      throw AppFailure('当前环境不支持自定义源');
   Future<List<String>> suggestions(String query) async => const [];
   Future<Map<String, dynamic>> storage() async => {};
   Future<String> downloadDirectory() async =>
@@ -444,6 +460,56 @@ class NativeRepository extends AppRepository {
       SourceStatus.fromJson(
         await _call({'action': 'cancelSourceJob', 'source': source}),
       );
+
+  @override
+  Future<List<CustomSourceSite>> customSources() async {
+    _adminPermission();
+    final result = await _call({'action': 'customSources'});
+    return [
+      for (final row in result['items'] as List? ?? const [])
+        CustomSourceSite.fromJson(Map<String, dynamic>.from(row as Map)),
+    ];
+  }
+
+  @override
+  Future<CustomSourceSite> addCustomSource({
+    required String name,
+    required String base,
+  }) async {
+    _adminPermission();
+    final result = await _call({
+      'action': 'addCustomSource',
+      'name': name,
+      'base': base,
+    });
+    return CustomSourceSite.fromJson(
+      Map<String, dynamic>.from(result as Map),
+    );
+  }
+
+  @override
+  Future<CustomSourceSite> updateCustomSource(
+    String id, {
+    required String name,
+    required String base,
+  }) async {
+    _adminPermission();
+    final result = await _call({
+      'action': 'updateCustomSource',
+      'source': id,
+      'name': name,
+      'base': base,
+    });
+    return CustomSourceSite.fromJson(
+      Map<String, dynamic>.from(result as Map),
+    );
+  }
+
+  @override
+  Future<void> removeCustomSource(String id) async {
+    _adminPermission();
+    await _call({'action': 'removeCustomSource', 'source': id});
+  }
 
   void _authorize(String source, {bool download = false}) {
     if (!SourceSite.isAvailable(source)) {
