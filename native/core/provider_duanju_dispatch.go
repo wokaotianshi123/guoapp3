@@ -47,6 +47,10 @@ func (d *Downloader) fetchDuanjuCatalogPage(ctx context.Context, source string, 
 		return d.fetchNiuguoCatalogPage(ctx, page, category)
 	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo, sourcePiguo:
 		return d.fetchMaccmsCatalogPage(ctx, source, page, category)
+	default:
+		if isCustomMaccmsSource(source) {
+			return d.fetchMaccmsCatalogPage(ctx, source, page, category)
+		}
 	}
 	return nil, false, errors.New("该站源暂未接入目录")
 }
@@ -70,6 +74,10 @@ func (d *Downloader) fetchDuanjuDetail(ctx context.Context, source, sourceID str
 		return d.fetchNiuguoDetail(ctx, sourceID)
 	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo, sourcePiguo:
 		return d.fetchMaccmsDetail(ctx, source, sourceID)
+	default:
+		if isCustomMaccmsSource(source) {
+			return d.fetchMaccmsDetail(ctx, source, sourceID)
+		}
 	}
 	return Drama{}, nil, errors.New("该站源暂未接入详情")
 }
@@ -93,6 +101,10 @@ func (d *Downloader) searchDuanju(ctx context.Context, source, query string) ([]
 		return d.searchNiuguo(ctx, query)
 	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo, sourcePiguo:
 		return d.searchMaccms(ctx, source, query)
+	default:
+		if isCustomMaccmsSource(source) {
+			return d.searchMaccms(ctx, source, query)
+		}
 	}
 	return nil, errors.New("该站源不支持在线搜索")
 }

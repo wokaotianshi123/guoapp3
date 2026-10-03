@@ -112,6 +112,8 @@ type nativeInput struct {
 	Action           string                  `json:"action"`
 	Directory        string                  `json:"directory"`
 	Source           string                  `json:"source"`
+	Name             string                  `json:"name"`
+	Base             string                  `json:"base"`
 	Page             int                     `json:"page"`
 	Query            string                  `json:"query"`
 	Category         string                  `json:"category"`
@@ -181,6 +183,7 @@ type nativeEngine struct {
 	sourceRecords    map[string]nativeSourceRecord
 	sourceCatalogMu  sync.Mutex
 	sourceCatalogs   map[string]chan struct{}
+	customRegistry   *customMaccmsRegistry
 }
 
 var nativeState struct {
@@ -285,6 +288,8 @@ func newNativeEngine(directory string) (*nativeEngine, error) {
 	d.loadRankingCache()
 	engine.loadCatalogCache()
 	engine.loadSourceRecords()
+	engine.customRegistry = newCustomMaccmsRegistry(directory)
+	engine.customRegistry.load()
 	engine.covers = newNativeCoverCache(directory, d)
 	engine.downloads = newNativeDownloads(engine)
 	return engine, nil
@@ -458,6 +463,22 @@ func nativeDispatch(input nativeInput) (any, error) {
 		return engine.startSourceTask(input.Source, input.Command, input.Drama)
 	case "cancelSourceJob":
 		return engine.cancelSourceTask(input.Source), nil
+	case "customSources":
+		return map[string]any{"items": engine.customMaccmsSources()}, nil
+	case "addCustomSource":
+		record, err := engine.addCustomMaccmsSource(input.Name, input.Base)
+		if err != nil {
+			return nil, err
+		}
+		return record, nil
+	case "updateCustomSource":
+		record, err := engine.updateCustomMaccmsSource(input.Source, input.Name, input.Base)
+		if err != nil {
+			return nil, err
+		}
+		return record, nil
+	case "removeCustomSource":
+		return true, engine.removeCustomMaccmsSource(input.Source)
 	case "cover":
 		return engine.loadCover(ctx, input.Drama, input.Force)
 	case "prepareCover":

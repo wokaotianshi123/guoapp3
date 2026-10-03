@@ -251,8 +251,8 @@ func maccmsSourceIDFromURL(link string) string {
 func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, page int, category string) ([]Drama, bool, error) {
 	base := d.duanjuBaseURL(source)
 	address := ""
-	switch source {
-	case sourceHuaguo:
+	switch {
+	case source == sourceHuaguo:
 		if page <= 1 && strings.TrimSpace(category) == "" {
 			address = base + "/"
 		} else {
@@ -262,7 +262,7 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 			}
 			address = fmt.Sprintf("%s/search.html?page=%d&searchtype=5&tid=%s&year=", base, page, url.QueryEscape(class))
 		}
-	case sourceFaguo:
+	case source == sourceFaguo:
 		class := strings.TrimSpace(category)
 		if class == "" {
 			address = fmt.Sprintf("%s/xzyxvt/%dzmn.html", base, page)
@@ -271,21 +271,21 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 		} else {
 			return nil, false, errors.New("发果分类无效")
 		}
-	case sourceWuguo:
+	case source == sourceWuguo:
 		class := strings.TrimSpace(category)
 		if class == "" {
 			address = base + "/"
 		} else {
 			address = fmt.Sprintf("%s%s/page/%d.html", base, strings.TrimSuffix(class, ".html"), page)
 		}
-	case sourceWangguo:
+	case source == sourceWangguo:
 		class := strings.TrimSpace(category)
 		if class == "" {
 			address = fmt.Sprintf("%s/show/duanju-----------.html", base)
 		} else {
 			address = fmt.Sprintf("%s%s%d---.html", base, strings.SplitN(class, "---.html", 2)[0], page)
 		}
-	case sourcePiguo:
+	case source == sourcePiguo:
 		class := strings.TrimSpace(category)
 		if class == "" {
 			class = "67"
@@ -294,6 +294,13 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 			address = fmt.Sprintf("%s/p/66/c/%s", base, url.PathEscape(class))
 		} else {
 			address = fmt.Sprintf("%s/p/66/c/%s?year=&page=%d", base, url.PathEscape(class), page)
+		}
+	case isCustomMaccmsSource(source):
+		// 自定义 maccms 站点：按常见路径变体自动探测目录入口。
+		if page <= 1 {
+			address = base + "/"
+		} else {
+			address = fmt.Sprintf("%s/index.php/vod/show/id/%d.html", base, page)
 		}
 	default:
 		return nil, false, errors.New("该站源没有网页目录")
@@ -356,35 +363,45 @@ func (d *Downloader) fetchMaccmsDetail(ctx context.Context, source, sourceID str
 }
 
 func maccmsDetailCandidates(source, base, sourceID string) []string {
-	switch source {
-	case sourceFaguo:
+	switch {
+	case source == sourceFaguo:
 		return []string{
 			fmt.Sprintf("%s/xzyxvd/%s.html", base, sourceID),
 			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
 			fmt.Sprintf("%s/voddetail/%s.html", base, sourceID),
 		}
-	case sourceWuguo:
+	case source == sourceWuguo:
 		return []string{
 			fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
 			fmt.Sprintf("%s/dramaDetail/%s.html", base, sourceID),
 			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
 		}
-	case sourceWangguo:
+	case source == sourceWangguo:
 		return []string{
 			fmt.Sprintf("%s/vod/%s.html", base, sourceID),
 			fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
 			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
 		}
-	case sourcePiguo:
+	case source == sourcePiguo:
 		return []string{
 			fmt.Sprintf("%s/movie/%s", base, sourceID),
 			fmt.Sprintf("%s/p/66/d/%s", base, sourceID),
 		}
-	case sourceHuaguo:
+	case source == sourceHuaguo:
 		return []string{
 			fmt.Sprintf("%s/zywview/%s.html", base, sourceID),
 			fmt.Sprintf("%s/zywdetail/%s.html", base, sourceID),
 			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
+		}
+	case isCustomMaccmsSource(source):
+		// 兼容 /index.php/vod/detail/id/…、/index.php/vod/…、/vod/detail/…、/vod/… 等路径变体。
+		return []string{
+			fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
+			fmt.Sprintf("%s/index.php/vod/play/id/%s.html", base, sourceID),
+			fmt.Sprintf("%s/vod/detail/id/%s.html", base, sourceID),
+			fmt.Sprintf("%s/voddetail/%s.html", base, sourceID),
+			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
+			fmt.Sprintf("%s/vod/%s.html", base, sourceID),
 		}
 	default:
 		return nil
@@ -517,17 +534,19 @@ func maccmsDetailCategory(document *html.Node) string {
 func (d *Downloader) searchMaccms(ctx context.Context, source, query string) ([]Drama, error) {
 	base := d.duanjuBaseURL(source)
 	var address string
-	switch source {
-	case sourceHuaguo:
+	switch {
+	case source == sourceHuaguo:
 		address = fmt.Sprintf("%s/search.html?searchword=%s", base, url.QueryEscape(query))
-	case sourceFaguo:
+	case source == sourceFaguo:
 		address = fmt.Sprintf("%s/xzyxvc/%s-wdyswzqun1num.html", base, url.PathEscape(query))
-	case sourceWuguo:
+	case source == sourceWuguo:
 		address = fmt.Sprintf("%s/index.php/vod/search/page/1/wd/%s.html", base, url.PathEscape(query))
-	case sourceWangguo:
+	case source == sourceWangguo:
 		address = fmt.Sprintf("%s/search/%s----------1---.html", base, url.PathEscape(query))
-	case sourcePiguo:
+	case source == sourcePiguo:
 		address = fmt.Sprintf("%s/q/%s?page=1", base, url.PathEscape(query))
+	case isCustomMaccmsSource(source):
+		address = fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", base, url.PathEscape(query))
 	default:
 		return nil, errors.New("该站源不支持在线搜索")
 	}

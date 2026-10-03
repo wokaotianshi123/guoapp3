@@ -113,12 +113,20 @@ var duanjuSourcesByName = func() map[string]duanjuSourceSpec {
 
 func isDuanjuProviderSource(source string) bool {
 	_, found := duanjuSourcesByName[canonicalProviderSource(source)]
+	if found {
+		return true
+	}
+	_, found = customMaccmsSpecFor(canonicalProviderSource(source))
 	return found
 }
 
 func duanjuSourceSpecFor(source string) (duanjuSourceSpec, bool) {
-	spec, found := duanjuSourcesByName[canonicalProviderSource(source)]
-	return spec, found
+	source = canonicalProviderSource(source)
+	spec, found := duanjuSourcesByName[source]
+	if found {
+		return spec, found
+	}
+	return customMaccmsSpecFor(source)
 }
 
 func duanjuSourceName(source string) string {

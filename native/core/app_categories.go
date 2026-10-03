@@ -92,6 +92,10 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 	case sourceHuangdou:
 		return all, nil
 	}
+	if isCustomMaccmsSource(source) {
+		// 自定义 maccms 站点暂不提供静态分类，仅展示"全部"。
+		return all, nil
+	}
 	engine.mu.Lock()
 	cached := append([]nativeCategory{}, engine.categoryOptions[source]...)
 	engine.mu.Unlock()
