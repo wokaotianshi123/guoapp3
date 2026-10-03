@@ -75,8 +75,90 @@ var state = {
 };
 
 var hlsInstance = null;
+var blackWatchdog = null;
 var lastProgressSave = 0;
 var autoNextTimer = null;
+
+// 播放失败自动换线（对齐 Flutter 端 fallback 机制）：
+// hls.js 出现致命网络/媒体错误时，自动请求下一条线路重建播放，
+// 全部线路试完才提示播放失败。
+var routeTried = {};
+var routeTotal = 1;
+var failoverBusy = false;
+
+function markRouteTried(route) {
+  routeTried[route] = true;
+}
+
+function resetRouteTried(route, total) {
+  routeTried = {};
+  routeTotal = total || 1;
+  markRouteTried(route || 0);
+}
+
+function nextRouteToTry() {
+  for (var route = 0; route < routeTotal; route += 1) {
+    if (!routeTried[route]) {
+      return route;
+    }
+  }
+  return -1;
+}
+
+function failoverRoute(reasonText) {
+  var drama = state.drama;
+  var chapters = state.chapters || [];
+  var plan = state.plan;
+  var video = document.getElementById('player');
+  if (!drama || !plan || !video || failoverBusy) {
+    return;
+  }
+  var mountAt = mountToken;
+  var route = nextRouteToTry();
+  if (route < 0) {
+    showNotice('播放失败：' + (reasonText || '未知错误') + '（已尝试全部 ' + routeTotal + ' 条线路）');
+    return;
+  }
+  failoverBusy = true;
+  markRouteTried(route);
+  showNotice('当前线路无法播放，正在自动切换到线路 ' + (route + 1) + '/' + routeTotal + '…', 'switching');
+  apiPlay({
+    drama: drama,
+    chapter: chapters[state.index],
+    index: state.index,
+    quality: state.quality || 0,
+    route: route,
+  })
+    .then(function (next) {
+      if (mountAt !== mountToken) {
+        return; // 用户已手动切线路/换集，放弃这次迟到的换线结果
+      }
+      state.plan = next;
+      state.route = route;
+      routeTotal = next.routeCount || routeTotal;
+      var routeBox = document.getElementById('route-select');
+      if (routeBox) {
+        routeBox.value = String(route);
+      }
+      // 新线路是新的播放会话，沿用同一 <video> 就地重建，倍速/全屏都不丢。
+      mountVideo(next.url, 0);
+    })
+    .catch(function () {
+      if (mountAt !== mountToken) {
+        return;
+      }
+      showNotice('线路 ' + (route + 1) + ' 解析失败，正在尝试其它线路…');
+      setTimeout(function () {
+        failoverBusy = false;
+        if (mountAt === mountToken) {
+          failoverRoute(reasonText);
+        }
+      }, 800);
+    })
+    .finally(function () {
+      failoverBusy = false;
+    });
+}
 
 function escapeHTML(value) {
   return String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, function (char) {
@@ -630,6 +712,7 @@ function playNextEpisode() {
       }
       state.index = nextIndex;
       state.plan = plan;
+      resetRouteTried(plan.routeIndex || 0, plan.routeCount || 1);
       var note = document.getElementById('play-note');
       if (note) {
         note.textContent = '';
@@ -677,6 +760,7 @@ function playPreviousEpisode() {
       }
       state.index = prevIndex;
       state.plan = plan;
+      resetRouteTried(plan.routeIndex || 0, plan.routeCount || 1);
       var note = document.getElementById('play-note');
       if (note) {
         note.textContent = '';
@@ -800,7 +884,8 @@ function bindPlayerEvents(video) {
   });
   video.addEventListener('playing', function () {
     var box = document.getElementById('play-note');
-    if (box && box.getAttribute('data-kind') === 'transcode') {
+    if (box && (box.getAttribute('data-kind') === 'transcode' ||
+      box.getAttribute('data-kind') === 'switching')) {
       box.style.display = 'none';
     }
   });
@@ -857,6 +942,42 @@ function restoreFullscreen() {
   }
 }
 
+// 黑屏看门狗：部分线路的 TS 把 H.265 藏在私有流（PMT stream_type=0x06）里，
+// 浏览器 MSE 认不出可解码的视频轨，表现为"进度条在走、画面全黑"。
+// 检测到时间推进但 videoWidth 始终为 0 时，同样走自动换线。
+function startBlackScreenWatchdog(video, token) {
+  var lastTime = -1;
+  var advancing = 0;
+  var timer = setInterval(function () {
+    if (token !== mountToken) {
+      clearInterval(timer);
+      return;
+    }
+    if (video.paused && !hlsInstance) {
+      return;
+    }
+    if (video.videoWidth > 0) {
+      clearInterval(timer); // 画面已出来，看门狗使命完成
+      return;
+    }
+    if (video.currentTime > lastTime + 1) {
+      advancing += 1;
+    } else {
+      advancing = 0;
+    }
+    lastTime = video.currentTime;
+    if (advancing >= 3) {
+      clearInterval(timer);
+      showNotice('该线路画面无法解码（可能是浏览器不支持的视频编码），正在自动切换线路…', 'switching');
+      failoverRoute('视频编码不支持');
+    }
+  }, 3000);
+  if (blackWatchdog) {
+    clearInterval(blackWatchdog);
+  }
+  blackWatchdog = timer;
+}
+
 function mountVideo(url, resumeAt) {
   var video = document.getElementById('player');
   if (!video) {
@@ -873,7 +994,9 @@ function mountVideo(url, resumeAt) {
   var token = ++mountToken;
   video.onerror = function () {
     cancelAutoNext();
-    showNotice('视频加载失败，可以换个线路或画质重试。');
+    // 加载失败先自动换线；hls.js 路径下它的 fatal 回调同样走 failoverRoute，
+    // 内部有并发锁与已试线路去重，不会重复触发。
+    failoverRoute('视频加载失败');
   };
   var isPlaylist = /\.m3u8($|\?)/i.test(url);
   var mediaRecoveries = 0;
@@ -884,14 +1007,19 @@ function mountVideo(url, resumeAt) {
         default: {
           maxTimeToFirstByteMs: 60000,
           maxLoadTimeMs: 120000,
-          timeoutRetry: { maxNumRetry: 10, retryDelayMs: 1000, maxRetryDelayMs: 8000, backoff: 'linear' },
-          errorRetry: { maxNumRetry: 10, retryDelayMs: 2000, maxRetryDelayMs: 10000, backoff: 'linear' },
+          // 重试次数收敛：线路 403/限流属于"重试也不会好"的错误，
+          // 快速判死交给自动换线，避免用户干等一两分钟。
+          timeoutRetry: { maxNumRetry: 2, retryDelayMs: 500, maxRetryDelayMs: 2000, backoff: 'linear' },
+          errorRetry: { maxNumRetry: 2, retryDelayMs: 800, maxRetryDelayMs: 3000, backoff: 'linear' },
         },
       },
     });
     hlsInstance.on(window.Hls.Events.ERROR, function (event, data) {
       if (!data || !data.fatal) {
         return;
+      }
+      if (token !== mountToken) {
+        return; // 旧实例的迟到回调，忽略
       }
       // 播放追上转码进度时会缓冲停滞，这属于正常现象，恢复播放等转码跟上即可。
       if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 4) {
@@ -900,7 +1028,12 @@ function mountVideo(url, resumeAt) {
         hlsInstance.recoverMediaError();
         return;
       }
-      showNotice('播放失败：' + (data.details || data.type || '未知错误'));
+      // 致命网络错误（含 manifestLoadError）或已耗尽媒体恢复次数：自动切换线路。
+      var reason = data.details || data.type || '未知错误';
+      if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+        reason = '画面解码失败';
+      }
+      failoverRoute(reason);
     });
     hlsInstance.loadSource(url);
     hlsInstance.attachMedia(video);
@@ -927,7 +1060,17 @@ function mountVideo(url, resumeAt) {
         }
         try {
           video.currentTime = resumeAt;
-          showNotice('已从上次进度 ' + formatTime(resumeAt) + ' 继续播放。');
+          showNotice('已从上次进度 ' + formatTime(resumeAt) + ' 继续播放。', 'resume');
+          // 播放真正开始由 playing 事件清掉它；万一用户一直不点播放，5 秒后也自动收起。
+          setTimeout(function () {
+            if (token !== mountToken) {
+              return;
+            }
+            var box = document.getElementById('play-note');
+            if (box && box.getAttribute('data-kind') === 'resume') {
+              box.style.display = 'none';
+            }
+          }, 5000);
         } catch (error) {
           // 部分流不允许跳转，忽略即可。
         }
@@ -935,6 +1078,8 @@ function mountVideo(url, resumeAt) {
       { once: true },
     );
   }
+  // 浏览器拿不到视频帧但时间在走（HEVC/私有流），9 秒内自动换线。
+  startBlackScreenWatchdog(video, token);
 }
 
 function optionHTML(value, label, selected) {
@@ -963,6 +1108,7 @@ function renderPlay(id, index, source) {
     })
     .then(function (plan) {
       state.plan = plan;
+      resetRouteTried(plan.routeIndex || 0, plan.routeCount || 1);
       var qualities = plan.qualities || [];
       var current = plan.quality || 0;
       if (qualities.indexOf(current) === -1 && qualities.length) {
