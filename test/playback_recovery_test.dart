@@ -10,14 +10,17 @@ void main() {
     routeCount: count,
   );
 
-  test('tries alternate routes before one fresh resolution, then stops', () {
+  test('retries the same route first, then alternates, then stops', () {
     final recovery = PlaybackRecovery();
+    // 第一次失败：不急着换线，先原线路重新解析一次。
+    expect(recovery.next(route(0)), PlaybackRecoveryAction.refresh);
+    // 仍失败：逐条切换备用线路。
     expect(recovery.next(route(0)), PlaybackRecoveryAction.alternative);
     expect(recovery.next(route(1)), PlaybackRecoveryAction.alternative);
-    expect(recovery.next(route(2)), PlaybackRecoveryAction.refresh);
-    expect(recovery.next(route(0)), PlaybackRecoveryAction.stop);
+    // 线路 2 是最后一条，没有备选，停。
+    expect(recovery.next(route(2)), PlaybackRecoveryAction.stop);
     recovery.reset();
-    expect(recovery.next(route(0)), PlaybackRecoveryAction.alternative);
+    expect(recovery.next(route(0)), PlaybackRecoveryAction.refresh);
   });
 
   test('one-route sources refresh once without endless retrying', () {
@@ -29,13 +32,15 @@ void main() {
 
   test('many failing alternatives cannot exceed the automatic retry limit', () {
     final recovery = PlaybackRecovery();
-    for (var i = 0; i < 3; i++) {
+    // 一次原线路重试 + 五条换线后触顶。
+    expect(recovery.next(route(0, count: 10)), PlaybackRecoveryAction.refresh);
+    for (var i = 1; i <= 5; i++) {
       expect(
         recovery.next(route(i, count: 10)),
         PlaybackRecoveryAction.alternative,
       );
     }
-    expect(recovery.next(route(3, count: 10)), PlaybackRecoveryAction.stop);
+    expect(recovery.next(route(6, count: 10)), PlaybackRecoveryAction.stop);
   });
 
   test(
