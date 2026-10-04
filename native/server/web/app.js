@@ -85,6 +85,11 @@ var autoNextTimer = null;
 var routeTried = {};
 var routeTotal = 1;
 var failoverBusy = false;
+// 换线前先给当前线路一次原地重试的机会：网络抖动、瞬时限流多数重试即恢复，
+// 避免一次抖动就误判死线路。每条线路在一条"连续失败链"里只享受一次这种宽容。
+var sameLineRetried = false;
+var sameLineRetryTimer = null;
+var lastMountUrl = '';
 
 function markRouteTried(route) {
   routeTried[route] = true;
@@ -93,6 +98,7 @@ function markRouteTried(route) {
 function resetRouteTried(route, total) {
   routeTried = {};
   routeTotal = total || 1;
+  sameLineRetried = false;
   markRouteTried(route || 0);
 }
 
@@ -105,7 +111,7 @@ function nextRouteToTry() {
   return -1;
 }
 
-function failoverRoute(reasonText) {
+function failoverRoute(reasonText, skipSameLineRetry) {
   var drama = state.drama;
   var chapters = state.chapters || [];
   var plan = state.plan;
@@ -113,6 +119,51 @@ function failoverRoute(reasonText) {
   if (!drama || !plan || !video || failoverBusy) {
     return;
   }
+  // 宽容第一层：换线前先在当前线路上原地重试一次。
+  // 网络抖动、瞬时限流大多重试即恢复，不该因此放弃一条本来能播的线路。
+  // skipSameLineRetry 用于确定性故障（如编码不支持），重试也不会变，直接换线。
+  if (!sameLineRetried && !skipSameLineRetry) {
+    sameLineRetried = true;
+    var retryToken = mountToken;
+    var resumePos = video.currentTime || 0;
+    showNotice('当前线路加载异常，正在原线路重试…', 'switching');
+    if (hlsInstance && lastMountUrl) {
+      // 只重拉清单，复用同一个 <video>：播放位置由 hls.js 按当前时间续上。
+      hlsInstance.loadSource(lastMountUrl);
+    } else if (lastMountUrl) {
+      video.src = lastMountUrl;
+      if (resumePos > 0) {
+        video.addEventListener(
+          'loadedmetadata',
+          function () {
+            try {
+              video.currentTime = resumePos;
+            } catch (error) {
+              // 个别流不允许跳转，忽略即可。
+            }
+          },
+          { once: true },
+        );
+      }
+      video.play().catch(function () {});
+    }
+    // 重试后既没报错也没恢复时（如错误只触发一次的场景），25 秒后兜底继续换线。
+    if (sameLineRetryTimer) {
+      clearTimeout(sameLineRetryTimer);
+    }
+    sameLineRetryTimer = setTimeout(function () {
+      sameLineRetryTimer = null;
+      if (retryToken !== mountToken) {
+        return; // 已重建播放（换线/换集），旧兜底作废
+      }
+      if (video.videoWidth > 0 && !video.paused) {
+        return; // 已恢复播放，不需要换线
+      }
+      failoverRoute(reasonText, true);
+    }, 25000);
+    return;
+  }
+  // 宽容第二层：重试仍失败才真正换线。
   var mountAt = mountToken;
   var route = nextRouteToTry();
   if (route < 0) {
@@ -140,6 +191,7 @@ function failoverRoute(reasonText) {
       if (routeBox) {
         routeBox.value = String(route);
       }
+      // 新线路也享有同等的"先原线重试"宽容，mountVideo 里会重置计数。
       // 新线路是新的播放会话，沿用同一 <video> 就地重建，倍速/全屏都不丢。
       mountVideo(next.url, 0);
     })
@@ -151,9 +203,10 @@ function failoverRoute(reasonText) {
       setTimeout(function () {
         failoverBusy = false;
         if (mountAt === mountToken) {
-          failoverRoute(reasonText);
+          // 线路解析失败没有可重试的会话，直接试下一条
+          failoverRoute(reasonText, true);
         }
-      }, 800);
+      }, 1500);
     })
     .finally(function () {
       failoverBusy = false;
@@ -883,6 +936,15 @@ function bindPlayerEvents(video) {
     rememberPlaybackRate(video.playbackRate);
   });
   video.addEventListener('playing', function () {
+    // 线路已被证明能正常出画面：撤销"原线路重试"的消耗，
+    // 之后偶发一次网络抖动还能再享受一次宽容，而不是直接换线。
+    if (video.videoWidth > 0 && sameLineRetried) {
+      if (sameLineRetryTimer) {
+        clearTimeout(sameLineRetryTimer);
+        sameLineRetryTimer = null;
+      }
+      sameLineRetried = false;
+    }
     var box = document.getElementById('play-note');
     if (box && (box.getAttribute('data-kind') === 'transcode' ||
       box.getAttribute('data-kind') === 'switching')) {
@@ -953,11 +1015,14 @@ function startBlackScreenWatchdog(video, token) {
       clearInterval(timer);
       return;
     }
-    if (video.paused && !hlsInstance) {
-      return;
-    }
     if (video.videoWidth > 0) {
       clearInterval(timer); // 画面已出来，看门狗使命完成
+      return;
+    }
+    if (video.paused || video.seeking) {
+      // 暂停、拖动期间时间轴本来就不动，不作判定依据
+      advancing = 0;
+      lastTime = video.currentTime;
       return;
     }
     if (video.currentTime > lastTime + 1) {
@@ -966,12 +1031,13 @@ function startBlackScreenWatchdog(video, token) {
       advancing = 0;
     }
     lastTime = video.currentTime;
-    if (advancing >= 3) {
+    if (advancing >= 6) {
       clearInterval(timer);
       showNotice('该线路画面无法解码（可能是浏览器不支持的视频编码），正在自动切换线路…', 'switching');
-      failoverRoute('视频编码不支持');
+      // 编码不兼容是确定性故障，原线路重试也不会变，直接换线
+      failoverRoute('视频编码不支持', true);
     }
-  }, 3000);
+  }, 4000);
   if (blackWatchdog) {
     clearInterval(blackWatchdog);
   }
@@ -992,10 +1058,17 @@ function mountVideo(url, resumeAt) {
     bindPlayerEvents(video);
   }
   var token = ++mountToken;
+  // 每次新建播放（首次播放 / 换集 / 换画质 / 换到某条新线路）都视为"全新尝试"，
+  // 给这条线路重新享有一次原线路重试的宽容预算。
+  lastMountUrl = url;
+  sameLineRetried = false;
+  if (sameLineRetryTimer) {
+    clearTimeout(sameLineRetryTimer);
+    sameLineRetryTimer = null;
+  }
   video.onerror = function () {
     cancelAutoNext();
-    // 加载失败先自动换线；hls.js 路径下它的 fatal 回调同样走 failoverRoute，
-    // 内部有并发锁与已试线路去重，不会重复触发。
+    // 加载失败先走"原线路重试"，重试仍失败才换线（failoverRoute 内部两层）。
     failoverRoute('视频加载失败');
   };
   var isPlaylist = /\.m3u8($|\?)/i.test(url);
@@ -1007,10 +1080,9 @@ function mountVideo(url, resumeAt) {
         default: {
           maxTimeToFirstByteMs: 60000,
           maxLoadTimeMs: 120000,
-          // 重试次数收敛：线路 403/限流属于"重试也不会好"的错误，
-          // 快速判死交给自动换线，避免用户干等一两分钟。
-          timeoutRetry: { maxNumRetry: 2, retryDelayMs: 500, maxRetryDelayMs: 2000, backoff: 'linear' },
-          errorRetry: { maxNumRetry: 2, retryDelayMs: 800, maxRetryDelayMs: 3000, backoff: 'linear' },
+          // 清单加载先自行重试几轮，抗住瞬时抖动；连续失败到顶才判死换线。
+          timeoutRetry: { maxNumRetry: 3, retryDelayMs: 1000, maxRetryDelayMs: 4000, backoff: 'linear' },
+          errorRetry: { maxNumRetry: 3, retryDelayMs: 1000, maxRetryDelayMs: 4000, backoff: 'linear' },
         },
       },
     });
