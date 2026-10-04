@@ -786,6 +786,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           !state.buffering &&
           (state.width ?? 0) > 0 &&
           state.position > position + const Duration(milliseconds: 300)) {
+        // 已经自愈：撤销"原线路重试"的消耗。否则这条失败链会带着旧状态，
+        // 之后偶发一次网络抖动就直接跳线，而不是先重试当前线路。
+        _recovery.reset();
         return;
       }
       unawaited(_recover());
