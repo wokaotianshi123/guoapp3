@@ -62,7 +62,6 @@ var sourceNames = []struct {
 	{"a123", "A123"},
 	{"hanxiaoquan", "韩小圈"},
 	{"guipian", "鬼片"},
-	{"sorani", "青空"},
 	{"huangdou", "黄豆"},
 	{"huangju", "剧果"},
 	{"yeguo", "野果"},
@@ -80,7 +79,6 @@ var sourceNames = []struct {
 	{"niuguo", "牛果"},
 	{"wangguo", "网果"},
 	{"faguo", "发果"},
-	{"piguo", "皮果"},
 	{"wuguo", "伍果"},
 }
 
