@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,13 +10,16 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/html"
 )
 
 var (
-	maccmsPlayerData     = regexp.MustCompile(`(?s)player_aaaa\s*=\s*(\{.*?\})\s*</script>`)
+	// 兼容 player_aaaa（标准 MacCMS/myui）与 player_data（macplus 模板，如 MGMGTV）两种变量名。
+	maccmsPlayerData     = regexp.MustCompile(`(?is)player_(?:aaaa|data)\s*=\s*(\{.*?\})\s*(?:</script>|;|$)`)
 	maccmsPlayerURLField = regexp.MustCompile(`(?i)"url"\s*:\s*"([^"]+)"`)
+	maccmsPlayerFrom     = regexp.MustCompile(`(?i)"from"\s*:\s*"([A-Za-z0-9_]+)"`)
 )
 
 type maccmsSourceProfile struct {
@@ -26,9 +30,11 @@ type maccmsSourceProfile struct {
 	Episodes    func(document *html.Node) []providerEpisode
 }
 
-var maccmsEpisodeLink = regexp.MustCompile(`(?i)/(?:vod/)?play/|/vodplay/|/drama-play|episode_id=`)
+// 剧集链接形态：/vod/play/、/index.php/vod/play/、/vodplay/、/xksiplay/ 等自定义前缀、/drama-play、episode_id=。
+var maccmsEpisodeLink = regexp.MustCompile(`(?i)/(?:vod/)?play/|/[a-z0-9_]*play/|/drama-play|episode_id=`)
 
-var maccmsDetailLink = regexp.MustCompile(`(?i)/(?:index\.php/vod/)?(?:detail|vod|show|view|movie|drama|zywview|xzyxvd)/`)
+// 详情链接形态：/detail/、/index.php/vod/detail/、/voddetail/、/xksidetail/ 等自定义前缀。
+var maccmsDetailLink = regexp.MustCompile(`(?i)/(?:index\.php/vod/)?(?:detail|vod|show|view|movie|drama|zywview|xzyxvd)/|[a-z0-9_]*detail/`)
 
 func maccmsEpisodeNodes(document *html.Node) []*html.Node {
 	var nodes []*html.Node
@@ -37,7 +43,7 @@ func maccmsEpisodeNodes(document *html.Node) []*html.Node {
 			nodes = append(nodes, providerHTMLNodes(list, func(node *html.Node) bool { return node.Data == "a" })...)
 		}
 	}
-	for _, name := range []string{"content__playlist", "playlink", "pcDrama_catalogItem", "catalogItem", "playlist"} {
+	for _, name := range []string{"content__playlist", "content__list", "playlink", "pcDrama_catalogItem", "catalogItem", "playlist"} {
 		collect(maccmsClassMatcher(name))
 	}
 	if len(nodes) == 0 {
@@ -87,6 +93,10 @@ func maccmsCardCover(card *html.Node, pageURL string) string {
 				return address
 			}
 		}
+		// 部分模板（如 myui）封面写在 img 的 style="background: url(...)" 中。
+		if address := maccmsStyleCover(providerHTMLAttr(image, "style"), pageURL); address != "" {
+			return address
+		}
 	}
 	for _, anchor := range providerHTMLNodes(card, func(node *html.Node) bool { return node.Data == "a" }) {
 		for _, attribute := range []string{"data-original", "data-src"} {
@@ -94,6 +104,22 @@ func maccmsCardCover(card *html.Node, pageURL string) string {
 				return address
 			}
 		}
+		// myui 模板封面常挂在 a.myui-vodlist__thumb 的 style="background: url(...)" 上。
+		if address := maccmsStyleCover(providerHTMLAttr(anchor, "style"), pageURL); address != "" {
+			return address
+		}
+	}
+	return ""
+}
+
+var maccmsStyleBackground = regexp.MustCompile(`(?i)background(?:-image)?\s*:\s*url\(\s*['"]?([^'")]+)`)
+
+func maccmsStyleCover(style, pageURL string) string {
+	if style == "" {
+		return ""
+	}
+	if matches := maccmsStyleBackground.FindStringSubmatch(style); len(matches) > 1 {
+		return providerCoverAddress(matches[1], pageURL)
 	}
 	return ""
 }
@@ -218,6 +244,8 @@ var maccmsCardClasses = []string{
 	"videoBox", "detail-list-item", "col-md-6", "col-6", "listItem", "FeaturedList_featuredItem",
 	"BrowseList_listItem", "SecondList_secondListItem", "vodlist__item", "v_list",
 	"entry-wrapper", "TagBookList_tagItem",
+	// myui / macplus 模板家族（qikantoukan、xiangmaile、mgmgtv 等）
+	"myui-vodlist__box", "macplus-vodlist__bag", "myui-vodlist__thumb", "macplus-vodlist__thumb",
 }
 
 var maccmsDetailPath = regexp.MustCompile(`(?i)/(?:voddetail|detail|show|vod|drama|movie|tv)/([0-9]+)(?:[-./]|$)`)
@@ -296,12 +324,8 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 			address = fmt.Sprintf("%s/p/66/c/%s?year=&page=%d", base, url.PathEscape(class), page)
 		}
 	case isCustomMaccmsSource(source):
-		// 自定义 maccms 站点：按常见路径变体自动探测目录入口。
-		if page <= 1 {
-			address = base + "/"
-		} else {
-			address = fmt.Sprintf("%s/index.php/vod/show/id/%d.html", base, page)
-		}
+		// 自定义 maccms 站点：按首页信号自动识别模板家族（index.php / myui 系），多候选探测。
+		return d.fetchMaccmsCustomCatalog(ctx, source, page, category)
 	default:
 		return nil, false, errors.New("该站源没有网页目录")
 	}
@@ -314,9 +338,92 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 	return items, len(items) > 0, nil
 }
 
+// fetchMaccmsCustomCatalog 面向自定义 maccms 站点的目录抓取：
+// 先取首页（page<=1 且无分类），page>1 或带分类时按模板家族探测出的 URL 形态逐候选尝试。
+func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string, page int, category string) ([]Drama, bool, error) {
+	base := d.duanjuBaseURL(source)
+	if page <= 1 && strings.TrimSpace(category) == "" {
+		document, _, err := d.fetchProviderPage(ctx, base+"/", base+"/", duanjuUserAgent)
+		if err != nil {
+			return nil, false, err
+		}
+		items := maccmsCards(document, source, base)
+		return items, len(items) > 0, nil
+	}
+	profile := maccmsCustomProfileFor(ctx, d, source, base)
+	class := strings.TrimSpace(category)
+	var candidates []string
+	switch {
+	case class == "":
+		if profile.Family == "myui" {
+			candidates = append(candidates, profile.AllPage(base, page))
+			candidates = append(candidates, profile.Category(base, "1", page))
+		} else {
+			candidates = append(candidates, profile.AllPage(base, page))
+			candidates = append(candidates, fmt.Sprintf("%s/index.php/vod/show/page/%d.html", base, page))
+			candidates = append(candidates, fmt.Sprintf("%s/vodshow/1-----------%d.html", base, page))
+			candidates = append(candidates, fmt.Sprintf("%s/xksishow/1-----------%d.html", base, page))
+			candidates = append(candidates, fmt.Sprintf("%s/vodtype/1-%d.html", base, page))
+		}
+	case profile.Family == "myui":
+		// myui 系分类 ID 直接是完整路径（如 /vodtype/2.html），需换算成分类编号。
+		id := class
+		if matches := regexp.MustCompile(`(\d{1,6})\.html$`).FindStringSubmatch(class); len(matches) > 1 {
+			id = matches[1]
+		}
+		candidates = append(candidates, profile.Category(base, id, page))
+		candidates = append(candidates, base+strings.TrimSuffix(class, ".html")+"-"+strconv.Itoa(page)+".html")
+		candidates = append(candidates, fmt.Sprintf("%s/vodshow/%s-----------%d.html", base, id, page))
+	default:
+		id := class
+		if matches := regexp.MustCompile(`(\d{1,6})\.html$`).FindStringSubmatch(class); len(matches) > 1 {
+			id = matches[1]
+		} else if matches := regexp.MustCompile(`/type/id/(\d{1,6})\.html$`).FindStringSubmatch(class); len(matches) > 1 {
+			id = matches[1]
+		}
+		if webProviderNumericID.MatchString(id) {
+			candidates = append(candidates, profile.Category(base, id, page))
+			candidates = append(candidates, fmt.Sprintf("%s/index.php/vod/type/id/%s/page/%d.html", base, id, page))
+			candidates = append(candidates, fmt.Sprintf("%s/vodtype/%s-%d.html", base, id, page))
+		} else {
+			candidates = append(candidates, base+strings.TrimSuffix(class, ".html")+"/"+strconv.Itoa(page)+".html",
+				base+strings.TrimSuffix(class, ".html")+"-"+strconv.Itoa(page)+".html")
+		}
+	}
+	seen := map[string]bool{}
+	var lastErr error
+	for _, address := range candidates {
+		if address == "" || seen[address] {
+			continue
+		}
+		seen[address] = true
+		document, _, err := d.fetchProviderPage(ctx, address, base+"/", duanjuUserAgent)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		items := maccmsCards(document, source, base)
+		if len(items) > 0 {
+			return items, true, nil
+		}
+		lastErr = errors.New("目录页未解析到剧集")
+	}
+	if lastErr == nil {
+		lastErr = errors.New("目录页无法访问")
+	}
+	return nil, false, lastErr
+}
+
 func (d *Downloader) fetchMaccmsDetail(ctx context.Context, source, sourceID string) (Drama, []Chapter, error) {
 	base := d.duanjuBaseURL(source)
 	candidates := maccmsDetailCandidates(source, base, sourceID)
+	if isCustomMaccmsSource(source) {
+		profile := maccmsCustomProfileFor(ctx, d, source, base)
+		candidates = append(profile.detailCandidates(base, sourceID), candidates...)
+		candidates = append(candidates, fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
+			fmt.Sprintf("%s/voddetail/%s.html", base, sourceID),
+			fmt.Sprintf("%s/detail/%s.html", base, sourceID))
+	}
 	var lastErr error
 	for _, address := range candidates {
 		document, finalURL, err := d.fetchProviderPage(ctx, address, base+"/", duanjuUserAgent)
@@ -394,15 +501,8 @@ func maccmsDetailCandidates(source, base, sourceID string) []string {
 			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
 		}
 	case isCustomMaccmsSource(source):
-		// 兼容 /index.php/vod/detail/id/…、/index.php/vod/…、/vod/detail/…、/vod/… 等路径变体。
-		return []string{
-			fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
-			fmt.Sprintf("%s/index.php/vod/play/id/%s.html", base, sourceID),
-			fmt.Sprintf("%s/vod/detail/id/%s.html", base, sourceID),
-			fmt.Sprintf("%s/voddetail/%s.html", base, sourceID),
-			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
-			fmt.Sprintf("%s/vod/%s.html", base, sourceID),
-		}
+		// 自定义站点：详情页候选由模板探测决定（兼容 index.php、voddetail、xksidetail 等形态）。
+		return nil
 	default:
 		return nil
 	}
@@ -546,21 +646,43 @@ func (d *Downloader) searchMaccms(ctx context.Context, source, query string) ([]
 	case source == sourcePiguo:
 		address = fmt.Sprintf("%s/q/%s?page=1", base, url.PathEscape(query))
 	case isCustomMaccmsSource(source):
-		address = fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", base, url.PathEscape(query))
+		// 自定义站点：按模板家族使用对应搜索路径（index.php / vodsearch / xksisearch 等）。
+		profile := maccmsCustomProfileFor(ctx, d, source, base)
+		address = profile.Search(base, query)
 	default:
 		return nil, errors.New("该站源不支持在线搜索")
 	}
 	document, _, err := d.fetchProviderPage(ctx, address, base+"/", duanjuUserAgent)
 	if err != nil {
+		if isCustomMaccmsSource(source) {
+			fallback := fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", base, url.PathEscape(query))
+			if !strings.EqualFold(fallback, address) {
+				if retry, _, retryErr := d.fetchProviderPage(ctx, fallback, base+"/", duanjuUserAgent); retryErr == nil {
+					return maccmsCards(retry, source, base), nil
+				}
+			}
+		}
 		return nil, err
 	}
-	return maccmsCards(document, source, base), nil
+	items := maccmsCards(document, source, base)
+	if len(items) == 0 && isCustomMaccmsSource(source) {
+		// 首页形态没出结果时，再用 index.php 搜索兜底一次。
+		fallback := fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", base, url.PathEscape(query))
+		if !strings.EqualFold(fallback, address) {
+			if retry, _, retryErr := d.fetchProviderPage(ctx, fallback, base+"/", duanjuUserAgent); retryErr == nil {
+				items = maccmsCards(retry, source, base)
+			}
+		}
+	}
+	return items, nil
 }
 
 func maccmsPlayerURL(body string) string {
-	if matches := maccmsPlayerData.FindStringSubmatch(body); len(matches) > 1 {
-		if inner := maccmsPlayerURLField.FindStringSubmatch(matches[1]); len(inner) > 1 {
-			return strings.ReplaceAll(inner[1], `\/`, `/`)
+	fields := maccmsPlayerFields(body)
+	if urlValue := fields["url"]; urlValue != "" {
+		urlValue = maccmsDecryptPlayerURL(urlValue, fields["encrypt"])
+		if strings.HasPrefix(strings.ToLower(urlValue), "http") {
+			return urlValue
 		}
 	}
 	for _, pattern := range []*regexp.Regexp{
@@ -572,7 +694,270 @@ func maccmsPlayerURL(body string) string {
 			return strings.ReplaceAll(matches[1], `\/`, `/`)
 		}
 	}
+	if urlValue := fields["url"]; urlValue != "" {
+		return maccmsDecryptPlayerURL(urlValue, fields["encrypt"])
+	}
 	return ""
+}
+
+// maccmsPlayerFields 解析播放页中的 player_aaaa / player_data 对象（macplus 模板使用 player_data）。
+func maccmsPlayerFields(body string) map[string]string {
+	fields := map[string]string{}
+	matches := maccmsPlayerData.FindStringSubmatch(body)
+	if len(matches) < 2 {
+		return fields
+	}
+	blob := strings.ReplaceAll(matches[1], `\/`, "/")
+	var payload map[string]any
+	if json.Unmarshal([]byte(blob), &payload) == nil {
+		for _, key := range []string{"url", "encrypt", "from"} {
+			switch value := payload[key].(type) {
+			case string:
+				fields[key] = strings.TrimSpace(value)
+			case float64:
+				fields[key] = strconv.Itoa(int(value))
+			}
+		}
+	}
+	if fields["url"] == "" {
+		if inner := maccmsPlayerURLField.FindStringSubmatch(matches[1]); len(inner) > 1 {
+			fields["url"] = strings.ReplaceAll(inner[1], `\/`, `/`)
+		}
+	}
+	if fields["encrypt"] == "" {
+		if inner := regexp.MustCompile(`(?i)"encrypt"\s*:\s*"?([0-9])"?`).FindStringSubmatch(matches[1]); len(inner) > 1 {
+			fields["encrypt"] = inner[1]
+		}
+	}
+	return fields
+}
+
+// maccmsDecryptPlayerURL 复刻 player.js 的 encrypt 0/1/2 处理：原样、escape 编码、base64。
+func maccmsDecryptPlayerURL(raw, encrypt string) string {
+	switch encrypt {
+	case "1":
+		return maccmsUnescapeJS(raw)
+	case "2":
+		if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil {
+			return maccmsUnescapeJS(string(decoded))
+		}
+		return raw
+	default:
+		return raw
+	}
+}
+
+var maccmsJSEscapeHex = regexp.MustCompile(`%([0-9a-fA-F]{2})`)
+
+func maccmsUnescapeJS(value string) string {
+	if !strings.Contains(value, "%") {
+		return value
+	}
+	if unescaped, err := url.QueryUnescape(value); err == nil {
+		return unescaped
+	}
+	return maccmsJSEscapeHex.ReplaceAllStringFunc(value, func(match string) string {
+		if number, err := strconv.ParseInt(match[1:], 16, 8); err == nil {
+			return string(rune(number))
+		}
+		return match
+	})
+}
+
+type maccmsCustomProfile struct {
+	Family     string // "indexphp" / "myui" / "unknown"
+	TypePrefix string // myui 系分类路径前缀（vodtype / xksitype）
+	Categories []maccmsCategorySignal
+	DetailFmts []string
+	Category   func(base, category string, page int) string
+	AllPage    func(base string, page int) string
+	Search     func(base, query string) string
+}
+
+var maccmsCustomProfileCache sync.Map // source id -> maccmsCustomProfile
+
+func (p maccmsCustomProfile) detailCandidates(base, id string) []string {
+	var out []string
+	for _, format := range p.DetailFmts {
+		out = append(out, fmt.Sprintf(format, base, id))
+	}
+	return out
+}
+
+var (
+	maccmsHomeCategoryLink = regexp.MustCompile(`(?i)^/(?:index\.php/)?vod/type/id/(\d{1,6})\.html$`)
+	maccmsHomeTypeLink     = regexp.MustCompile(`(?i)^/([a-z][a-z0-9_]*type)/(\d{1,6})\.html$`)
+	maccmsAnchorTag        = regexp.MustCompile(`(?s)<[^>]*>`)
+	maccmsDetailSegment    = regexp.MustCompile(`(?i)^/([a-z0-9_]*detail)/`)
+)
+
+func maccmsCleanAnchorText(text string) string {
+	text = strings.TrimSpace(maccmsAnchorTag.ReplaceAllString(text, ""))
+	runes := []rune(text)
+	if len(runes) == 0 || len(runes) > 8 {
+		return ""
+	}
+	for _, r := range runes {
+		if r < 0x4e00 || r > 0x9fff {
+			return ""
+		}
+	}
+	return text
+}
+
+type maccmsCategorySignal struct {
+	ID   string
+	Name string
+}
+
+// maccmsCustomHomeSignals 从首页解析分类导航（ID/名称）与 myui 系路径前缀。
+func maccmsCustomHomeSignals(document *html.Node) ([]maccmsCategorySignal, string) {
+	var categories []maccmsCategorySignal
+	typePrefix := ""
+	firstDetail := ""
+	seen := map[string]bool{}
+	for _, anchor := range providerHTMLNodes(document, func(node *html.Node) bool { return node.Data == "a" }) {
+		href := strings.TrimSpace(providerHTMLAttr(anchor, "href"))
+		parsed, err := url.Parse(href)
+		if err != nil {
+			continue
+		}
+		path := parsed.Path
+		if path == "" || !strings.HasSuffix(path, ".html") {
+			continue
+		}
+		name := maccmsCleanAnchorText(providerHTMLText(anchor))
+		if matches := maccmsHomeCategoryLink.FindStringSubmatch(path); len(matches) > 1 {
+			if name != "" && !seen[matches[1]] {
+				seen[matches[1]] = true
+				categories = append(categories, maccmsCategorySignal{ID: matches[1], Name: name})
+			}
+			continue
+		}
+		if matches := maccmsHomeTypeLink.FindStringSubmatch(path); len(matches) > 2 {
+			if typePrefix == "" {
+				typePrefix = matches[1]
+			}
+			if name != "" && !seen[matches[2]] {
+				seen[matches[2]] = true
+				categories = append(categories, maccmsCategorySignal{ID: matches[2], Name: name})
+			}
+			continue
+		}
+		if firstDetail == "" && maccmsDetailPath.MatchString(path) {
+			firstDetail = path
+		}
+	}
+	if typePrefix == "" && firstDetail != "" {
+		if matches := maccmsDetailSegment.FindStringSubmatch(firstDetail); len(matches) > 1 {
+			typePrefix = strings.TrimSuffix(matches[1], "detail") + "type"
+		}
+	}
+	if len(categories) > 12 {
+		categories = categories[:12]
+	}
+	return categories, typePrefix
+}
+
+func maccmsCustomProfileFor(ctx context.Context, d *Downloader, source, base string) maccmsCustomProfile {
+	if cached, found := maccmsCustomProfileCache.Load(source); found {
+		return cached.(maccmsCustomProfile)
+	}
+	profile := fetchMaccmsCustomProfile(ctx, d, base)
+	maccmsCustomProfileCache.Store(source, profile)
+	return profile
+}
+
+// fetchMaccmsCustomCategories 返回自定义站点首页导航中的分类（缓存于模板探测结果）。
+func (d *Downloader) fetchMaccmsCustomCategories(ctx context.Context, source string) ([]nativeCategory, error) {
+	base := d.duanjuBaseURL(source)
+	if base == "" {
+		return nil, errors.New("站源地址不可用")
+	}
+	profile := maccmsCustomProfileFor(ctx, d, source, base)
+	var categories []nativeCategory
+	for _, signal := range profile.Categories {
+		if signal.ID == "" || signal.Name == "" {
+			continue
+		}
+		categories = append(categories, nativeCategory{ID: signal.ID, Name: signal.Name})
+	}
+	if len(categories) == 0 {
+		return nil, errors.New("未在首页识别到分类导航")
+	}
+	return categories, nil
+}
+
+func fetchMaccmsCustomProfile(ctx context.Context, d *Downloader, base string) maccmsCustomProfile {
+	profile := maccmsCustomProfile{
+		Family: "unknown",
+		DetailFmts: []string{
+			"%s/index.php/vod/detail/id/%s.html",
+			"%s/voddetail/%s.html",
+			"%s/detail/%s.html",
+			"%s/vod/%s.html",
+		},
+	}
+	profile.Search = func(base, query string) string {
+		return fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", base, url.PathEscape(query))
+	}
+	// Category/Page 对 unknown 家族：先试 index.php show 带分类，再试纯页码。
+	profile.Category = func(base, category string, page int) string {
+		return fmt.Sprintf("%s/index.php/vod/show/id/%s/page/%d.html", base, category, page)
+	}
+	profile.AllPage = func(base string, page int) string {
+		return fmt.Sprintf("%s/index.php/vod/show/page/%d.html", base, page)
+	}
+	document, _, err := d.fetchProviderPage(ctx, base+"/", base+"/", duanjuUserAgent)
+	if err != nil || document == nil {
+		return profile
+	}
+	categories, typePrefix := maccmsCustomHomeSignals(document)
+	if len(categories) == 0 {
+		return profile
+	}
+	profile.Categories = categories
+	// 出现 xxxtype/N.html 形态导航即 myui 家族（含自定义前缀），否则 indexphp 家族。
+	if typePrefix != "" {
+		profile.Family = "myui"
+	} else {
+		profile.Family = "indexphp"
+	}
+	switch profile.Family {
+	case "indexphp":
+		profile.DetailFmts = []string{"%s/index.php/vod/detail/id/%s.html", "%s/vod/detail/id/%s.html", "%s/detail/%s.html"}
+		profile.Category = func(base, category string, page int) string {
+			return fmt.Sprintf("%s/index.php/vod/show/id/%s/page/%d.html", base, category, page)
+		}
+		profile.AllPage = func(base string, page int) string {
+			return fmt.Sprintf("%s/index.php/vod/show/page/%d.html", base, page)
+		}
+	case "myui":
+		dash := "vod"
+		if typePrefix != "" && strings.HasSuffix(typePrefix, "type") {
+			dash = strings.TrimSuffix(typePrefix, "type")
+			if dash == "" {
+				dash = "vod"
+			}
+		}
+		profile.TypePrefix = typePrefix
+		profile.DetailFmts = []string{
+			fmt.Sprintf("%%s/%sdetail/%%s.html", dash),
+			"%s/voddetail/%s.html",
+			"%s/index.php/vod/detail/id/%s.html",
+			"%s/detail/%s.html",
+		}
+		profile.Search = func(base, query string) string {
+			return fmt.Sprintf("%s/%ssearch/%s-------------.html", base, dash, url.PathEscape(query))
+		}
+		profile.Category = func(base, category string, page int) string {
+			return fmt.Sprintf("%s/%sshow/%s-----------%d.html", base, dash, category, page)
+		}
+		profile.AllPage = func(base string, page int) string {
+			return fmt.Sprintf("%s/%sshow/1-----------%d.html", base, dash, page)
+		}
+	}
+	return profile
 }
 
 func maccmsNormalizePlaybackURL(raw string) string {
@@ -605,4 +990,103 @@ func maccmsDecodeUnicode(value string) string {
 		}
 		return match
 	})
+}
+
+// ---- macplus / player_data 加密资源的云解析链路（如 MGMGTV 的 mgtv_ 密文）----
+
+var (
+	maccmsPlayerScriptPath = regexp.MustCompile(`(?i)maccms\.path\s*\+\s*['"](/[^'"]*player[^'"]*)['"]`)
+	maccmsMaccmsVar        = regexp.MustCompile(`(?i)var\s+maccms\s*=\s*(\{.*?\})\s*;`)
+	maccmsPathField        = regexp.MustCompile(`(?i)"path"\s*:\s*"([^"]*)"`)
+	maccmsIframeSrc        = regexp.MustCompile(`(?i)iframe[^>]*src=["'](https?://[^"'\s]+)["']`)
+	maccmsVideoURLVar      = regexp.MustCompile(`(?i)var\s+video_url\s*=\s*['"]([^'"]+)['"]`)
+)
+
+// resolveMaccmsCloudParse 处理播放页给出非 http 加密 url 的场景：
+// 按 from 字段定位 /static/player/<from>.js，取出 iframe 解析接口地址，请求后从返回页面提取 m3u8。
+func (d *Downloader) resolveMaccmsCloudParse(ctx context.Context, body, encrypted, pageURL string) string {
+	return d.resolveMaccmsCloudParseLogged(ctx, body, encrypted, pageURL, nil)
+}
+
+func (d *Downloader) resolveMaccmsCloudParseLogged(ctx context.Context, body, encrypted, pageURL string, logf func(string, ...any)) string {
+	note := func(format string, args ...any) {
+		if logf != nil {
+			logf(format, args...)
+		}
+	}
+	if encrypted == "" || !strings.Contains(pageURL, "http") {
+		note("cloud: encrypted or pageURL empty")
+		return ""
+	}
+	parsed, err := url.Parse(pageURL)
+	if err != nil || parsed.Host == "" {
+		note("cloud: pageURL parse failed: %v", err)
+		return ""
+	}
+	siteBase := parsed.Scheme + "://" + parsed.Host
+	from := ""
+	if matches := maccmsPlayerFrom.FindStringSubmatch(body); len(matches) > 1 {
+		from = matches[1]
+	}
+	note("cloud: from=%q encrypted_len=%d", from, len(encrypted))
+	playerDir := "/static/player/"
+	if matches := maccmsPlayerScriptPath.FindStringSubmatch(body); len(matches) > 1 {
+		playerDir = matches[1]
+	} else if matches := maccmsMaccmsVar.FindStringSubmatch(body); len(matches) > 1 {
+		if inner := maccmsPathField.FindStringSubmatch(matches[1]); len(inner) > 1 && strings.TrimSpace(inner[1]) != "" {
+			playerDir = strings.TrimRight(inner[1], "/") + "/static/player/"
+		}
+	}
+	var scripts []string
+	if from != "" {
+		scripts = append(scripts, siteBase+playerDir+from+".js")
+	}
+	scripts = append(scripts, siteBase+"/static/player/m3u8.js", siteBase+"/static/player/mac.js")
+	referer := pageURL
+	var parseBase string
+	for _, script := range scripts {
+		content, err := d.fetchProviderText(ctx, script, referer)
+		if err != nil || content == "" || len(content) > 512*1024 {
+			note("cloud: script %s err=%v len=%d", script, err, len(content))
+			continue
+		}
+		if matches := maccmsIframeSrc.FindStringSubmatch(content); len(matches) > 1 {
+			candidate := strings.TrimSpace(matches[1])
+			if strings.Contains(candidate, "?") {
+				parseBase = candidate
+			} else {
+				parseBase = candidate + "?url="
+			}
+			note("cloud: iframe base=%s", parseBase)
+			break
+		}
+		note("cloud: no iframe in %s", script)
+	}
+	if parseBase == "" {
+		note("cloud: no parseBase")
+		return ""
+	}
+	endpoint := parseBase + encrypted
+	note("cloud: endpoint len=%d", len(endpoint))
+	if !strings.HasPrefix(endpoint, "http") {
+		return ""
+	}
+	response, err := d.fetchProviderText(ctx, endpoint, referer)
+	if err != nil {
+		note("cloud: endpoint fetch err=%v", err)
+		return ""
+	}
+	note("cloud: endpoint resp len=%d", len(response))
+	if matches := maccmsVideoURLVar.FindStringSubmatch(response); len(matches) > 1 {
+		if strings.HasPrefix(strings.ToLower(matches[1]), "http") {
+			note("cloud: video_url matched")
+			return matches[1]
+		}
+	}
+	if matches := regexp.MustCompile(`(?i)(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)`).FindStringSubmatch(response); len(matches) > 1 {
+		note("cloud: fallback m3u8 matched")
+		return matches[1]
+	}
+	note("cloud: no m3u8 in response")
+	return ""
 }

@@ -93,8 +93,19 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 		return all, nil
 	}
 	if isCustomMaccmsSource(source) {
-		// 自定义 maccms 站点暂不提供静态分类，仅展示"全部"。
-		return all, nil
+		// 自定义 maccms 站点：从首页导航实时提取分类；识别不到则仅展示"全部"。
+		categories, err := engine.downloader.fetchMaccmsCustomCategories(ctx, source)
+		if err != nil || len(categories) == 0 {
+			return all, nil
+		}
+		merged := append(all, categories...)
+		engine.mu.Lock()
+		if engine.categoryOptions == nil {
+			engine.categoryOptions = map[string][]nativeCategory{}
+		}
+		engine.categoryOptions[source] = merged
+		engine.mu.Unlock()
+		return merged, nil
 	}
 	engine.mu.Lock()
 	cached := append([]nativeCategory{}, engine.categoryOptions[source]...)

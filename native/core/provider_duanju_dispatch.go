@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +27,9 @@ func (d *Downloader) fetchDuanjuCategories(ctx context.Context, source string) (
 		return d.fetchYaguoCategories(ctx)
 	case sourceMaoguo:
 		return d.fetchMaoguoCategories(ctx)
+	}
+	if isCustomMaccmsSource(source) {
+		return d.fetchMaccmsCustomCategories(ctx, source)
 	}
 	return nil, errors.New("该站源暂未提供分类")
 }
@@ -174,10 +180,79 @@ func (d *Downloader) resolveDuanjuWebPage(ctx context.Context, source, pageURL, 
 		return providerMedia{}, err
 	}
 	address := maccmsNormalizePlaybackURL(maccmsPlayerURL(body))
-	if address == "" {
+	if isProviderHTTPMediaURL(address) {
+		return providerMedia{URL: address, Referer: pageURL}, nil
+	}
+	// macplus 模板（如 MGMGTV）给出的是加密串：走 /static/player/<from>.js 的 iframe 云解析拿真实 m3u8。
+	fields := maccmsPlayerFields(body)
+	encrypted := fields["url"]
+	if encrypted != "" && !strings.HasPrefix(strings.ToLower(encrypted), "http") {
+		if parsed := d.resolveMaccmsCloudParse(ctx, body, encrypted, pageURL); parsed != "" {
+			return providerMedia{URL: maccmsNormalizePlaybackURL(parsed), Referer: pageURL}, nil
+		}
+		// 当前线路云解析失败（如默认 sid 为 iqiyi 等重型加密线）：换该站其他线路逐条重试。
+		if alt := d.resolveMaccmsAlternateRoutes(ctx, pageURL); alt != "" {
+			return providerMedia{URL: maccmsNormalizePlaybackURL(alt), Referer: pageURL}, nil
+		}
+	}
+	if address == "" || !isProviderHTTPMediaURL(address) {
 		return providerMedia{}, fmt.Errorf("%s未返回有效播放地址，请刷新章节后重试", duanjuSourceName(source))
 	}
 	return providerMedia{URL: address, Referer: pageURL}, nil
+}
+
+var (
+	maccmsPlaySIDSegment = regexp.MustCompile(`(?i)sid/(\d+)`)
+	maccmsPlayMyuiTail   = regexp.MustCompile(`(?i)^(.*/\d+)-(\d+)-(\d+\.html)$`)
+)
+
+// resolveMaccmsAlternateRoutes 在当前播放页云解析失败时，尝试同一剧集的其他线路（sid）。
+// macplus/myui 播放页 URL 中 sid 即线路号，结构固定，直接替换 sid 构造其他线路播放页即可
+// （播放页里的 detail 链接多为推荐位，不可靠）。逐条抓页走云解析，返回首个成功的 m3u8。
+func (d *Downloader) resolveMaccmsAlternateRoutes(ctx context.Context, pageURL string) string {
+	parsed, err := url.Parse(pageURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	currentSID := -1
+	var paths []string
+	if matches := maccmsPlaySIDSegment.FindStringSubmatch(parsed.Path); len(matches) > 1 {
+		currentSID, _ = strconv.Atoi(matches[1])
+		for sid := 1; sid <= 9; sid++ {
+			if sid == currentSID {
+				continue
+			}
+			paths = append(paths, maccmsPlaySIDSegment.ReplaceAllString(parsed.Path, "sid/"+strconv.Itoa(sid)))
+		}
+	} else if matches := maccmsPlayMyuiTail.FindStringSubmatch(parsed.Path); len(matches) > 1 {
+		currentSID, _ = strconv.Atoi(matches[2])
+		for sid := 1; sid <= 9; sid++ {
+			if sid == currentSID {
+				continue
+			}
+			paths = append(paths, matches[1]+"-"+strconv.Itoa(sid)+"-"+matches[3])
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	siteBase := parsed.Scheme + "://" + parsed.Host
+	for _, path := range paths {
+		altURL := siteBase + path
+		altBody, err := d.fetchProviderText(ctx, altURL, pageURL)
+		if err != nil || altBody == "" {
+			continue
+		}
+		altFields := maccmsPlayerFields(altBody)
+		encrypted := altFields["url"]
+		if encrypted == "" || strings.HasPrefix(strings.ToLower(encrypted), "http") {
+			continue
+		}
+		if parsedResult := d.resolveMaccmsCloudParse(ctx, altBody, encrypted, altURL); parsedResult != "" {
+			return parsedResult
+		}
+	}
+	return ""
 }
 
 func (d *Downloader) duanjuSourceProbe(ctx context.Context, source string) (string, error) {

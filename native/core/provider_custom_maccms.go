@@ -71,12 +71,12 @@ func (registry *customMaccmsRegistry) load() {
 }
 
 func (registry *customMaccmsRegistry) save() error {
-	registry.mu.RLock()
+	// 调用方必须已持有 registry.mu 写锁（add/remove/replace 均在 Lock 保护下调用），
+	// 此处绝不能再 RLock，否则同一 goroutine 持写锁再取读锁会死锁。
 	records := make([]customMaccmsSource, 0, len(registry.sources))
 	for _, record := range registry.sources {
 		records = append(records, record)
 	}
-	registry.mu.RUnlock()
 	body, err := json.Marshal(records)
 	if err != nil || len(body) > customSourceMaxBytes {
 		return err
