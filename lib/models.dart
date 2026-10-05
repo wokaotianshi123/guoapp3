@@ -52,6 +52,7 @@ class SourceSite {
       id == 'guipian' ||
       id == 'hanxiaoquan' ||
       id == 'ikanbot' ||
+      id == 'a123' ||
       duanjuPaged;
   bool get duanjuPaged => const {
     'yaguo',
@@ -85,6 +86,11 @@ class SourceSite {
     '爱看机器人',
     '电影 · 剧集 · 多线路搜索',
   );
+  static const a123 = SourceSite(
+    'a123',
+    'A123',
+    '电影 · 连续剧 · 综艺 · 动漫 · 多线路',
+  );
   static const hanxiaoquan = SourceSite(
     'hanxiaoquan',
     '韩小圈',
@@ -107,6 +113,7 @@ class SourceSite {
   static const knownValues = [
     hongguo,
     ikanbot,
+    a123,
     hanxiaoquan,
     guipian,
     sorani,
@@ -122,6 +129,7 @@ class SourceSite {
   static const allValues = [
     hongguo,
     ikanbot,
+    a123,
     hanxiaoquan,
     guipian,
     sorani,
