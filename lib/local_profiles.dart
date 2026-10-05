@@ -40,7 +40,13 @@ class LocalProfile {
     final id = value['id'] as String;
     final name = (value['name'] as String).trim();
     final admin = value['admin'] == true;
-    final sources = (value['sources'] as List).cast<String>().toSet().toList();
+    // 已下线或从当前版本移除的站源会被丢弃，保证旧存档仍能读取，
+    // 也不会再出现在站源列表与站源管理中。
+    final sources = (value['sources'] as List)
+        .cast<String>()
+        .where((id) => SourceSite.isKnown(id))
+        .toSet()
+        .toList();
     final salt = value['salt'] as String? ?? '';
     final hash = value['pinHash'] as String? ?? '';
     if (!RegExp(r'^[a-zA-Z0-9_-]{1,64}$').hasMatch(id) ||
@@ -49,7 +55,6 @@ class LocalProfile {
         name.isEmpty ||
         name.length > 40 ||
         admin != (id == 'default') ||
-        sources.any((id) => !SourceSite.isKnown(id)) ||
         (salt.isEmpty != hash.isEmpty) ||
         (salt.isNotEmpty &&
             (!RegExp(r'^[a-f0-9]{32}$').hasMatch(salt) ||

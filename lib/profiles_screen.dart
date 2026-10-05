@@ -320,6 +320,8 @@ class _ProfileEditorState extends State<ProfileEditor> {
   final _pin = TextEditingController(), _confirm = TextEditingController();
   late final _sources =
       (widget.profile?.sources ?? SourceSite.values.map((s) => s.id).toList())
+          // 已从版本移除的站源不再保留，保存时也不会写回。
+          .where((id) => SourceSite.isKnown(id))
           .toSet();
   late bool _download = widget.profile?.download ?? true;
   bool _clearPin = false, _busy = false;

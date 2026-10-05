@@ -41,14 +41,12 @@ class SourceSite {
     'niuguo',
     'wangguo',
     'faguo',
-    'piguo',
     'wuguo',
   }.contains(id);
   bool get pagedSearch =>
       id == 'huangju' ||
       id == 'yeguo' ||
       id == 'dsd' ||
-      id == 'sorani' ||
       id == 'guipian' ||
       id == 'hanxiaoquan' ||
       id == 'ikanbot' ||
@@ -61,7 +59,6 @@ class SourceSite {
     'niuguo',
     'wangguo',
     'faguo',
-    'piguo',
     'wuguo',
   }.contains(id);
   bool get searchSuggestions => id == 'hongguo';
@@ -79,7 +76,6 @@ class SourceSite {
 
   static const hongguo = SourceSite('hongguo', '红果', '短剧 · 漫剧 · AI 剧');
   static const dsd = SourceSite('dsd', '帝果', '分类视频 · 在线搜索');
-  static const sorani = SourceSite('sorani', '青空', '番剧 · 剧场动画 · 特摄');
   static const guipian = SourceSite('guipian', '鬼片', '鬼片 · 电视剧 · 动漫');
   static const ikanbot = SourceSite(
     'ikanbot',
@@ -107,7 +103,6 @@ class SourceSite {
     SourceSite('niuguo', '牛果', '牛牛短剧 · 分类接口'),
     SourceSite('wangguo', '网果', '短剧网站 · 网页目录'),
     SourceSite('faguo', '发果', '168 短剧 · 网页目录'),
-    SourceSite('piguo', '皮果', 'PTT 短剧 · 网页目录'),
     SourceSite('wuguo', '伍果', '五五短剧 · 网页目录'),
   ];
   static const knownValues = [
@@ -116,7 +111,6 @@ class SourceSite {
     a123,
     hanxiaoquan,
     guipian,
-    sorani,
     SourceSite('huangdou', '黄豆', '精选短剧'),
     SourceSite('huangju', '剧果', '热门 · 最新 · 分类短剧'),
     SourceSite('yeguo', '野果', '分类短剧 · 在线搜索'),
@@ -132,7 +126,6 @@ class SourceSite {
     a123,
     hanxiaoquan,
     guipian,
-    sorani,
     SourceSite('huangdou', '黄豆', '精选短剧'),
     SourceSite('huangju', '剧果', '热门 · 最新 · 分类短剧'),
     SourceSite('yeguo', '野果', '分类短剧 · 在线搜索'),

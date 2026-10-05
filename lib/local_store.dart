@@ -45,6 +45,9 @@ class LocalStore extends ChangeNotifier {
   void _initialize() {
     try {
       _snapshot = LocalSnapshot(preferences);
+      // 先恢复自定义源：用户档案里可能勾选了自定义源，读取档案时
+      // SourceSite.customIds 必须已经就绪，否则档案会被判为无效。
+      _loadCustomSources();
       final raw = _snapshot!.getString('profiles');
       if (raw == null &&
           (_snapshot!.getString('activeProfile') != null ||
@@ -63,7 +66,6 @@ class LocalStore extends ChangeNotifier {
       _configurationError = null;
       _locked = forceLogin && profile.protected;
       _loadLibrary();
-      _loadCustomSources();
     } catch (_) {
       _block('本地用户配置损坏，已锁定访问。原始记录已保留，请重新读取或从备份恢复。');
     }

@@ -33,6 +33,9 @@ class LocalSnapshot {
     'autoExport',
     'exportPosters',
     'forceLogin',
+    // 自定义源是设备级配置，所有本地用户共用，必须在受管字段内，
+    // 否则保存自定义源会被判为“无效的本地配置字段”。
+    'customSources',
   };
   final SharedPreferences preferences;
   Map<String, Object> _values = {};
@@ -51,10 +54,18 @@ class LocalSnapshot {
   void reloadValues() {
     final raw = preferences.getString(storageKey);
     if (raw == null) {
-      _values = {
-        for (final key in preferences.getKeys().where(owns))
-          key: preferences.get(key)!,
-      };
+      // 旧版本逐键写入的记录：只接收类型正确的条目，历史脏数据直接忽略，
+      // 避免一条非法记录让整个本地配置无法加载。
+      final migrated = <String, Object>{};
+      for (final key in preferences.getKeys().where(owns)) {
+        final value = preferences.get(key);
+        if (value is String) {
+          migrated[key] = value;
+        } else if (value is bool) {
+          migrated[key] = value;
+        }
+      }
+      _values = migrated;
       _validate(_values);
       return;
     }
