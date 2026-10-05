@@ -192,18 +192,16 @@ func maccmsGenericRemark(anchor *html.Node) string {
 	return ""
 }
 
-// maccmsGenericSameSite 判定链接是否与站源同域（允许 www / 子域差异），
-// 用于过滤推荐位上的外站链接。
+// maccmsGenericSameSite 判定链接是否与站源同域（仅允许 www 前缀差异），
+// 用于过滤推荐位上的外站链接。注意：不允许任意子域（如 other.example.com）
+// 被当成 example.com 同站，否则外链会被误收为剧集。
 func maccmsGenericSameSite(linkHost, baseHost string) bool {
 	if linkHost == "" || baseHost == "" {
 		return false
 	}
 	link := strings.ToLower(strings.TrimPrefix(linkHost, "www."))
 	origin := strings.ToLower(strings.TrimPrefix(baseHost, "www."))
-	if link == origin {
-		return true
-	}
-	return strings.HasSuffix(link, "."+origin) || strings.HasSuffix(origin, "."+link)
+	return link == origin
 }
 
 // maccmsGenericScan 扫描页面所有链接，返回候选剧集。

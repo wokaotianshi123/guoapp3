@@ -177,8 +177,12 @@ func validDuanjuCategory(source, category string) bool {
 	if category == "" {
 		return true
 	}
-	if len(category) > 128 || strings.ContainsAny(category, "|/\\\x00\r\n") {
+	if len(category) > 128 || strings.ContainsAny(category, "|\\\x00\r\n") {
 		return false
+	}
+	if isCustomMaccmsSource(source) {
+		// 自定义 MacCMS 源分类 ID 允许路径形式（含 /），仅做基础非法字符校验。
+		return true
 	}
 	switch canonicalProviderSource(source) {
 	case sourceHeguo, sourceXingguo, sourceYaguo, sourceMaoguo, sourceNiuguo:

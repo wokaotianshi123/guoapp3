@@ -32,7 +32,7 @@ type maccmsSourceProfile struct {
 }
 
 // 剧集链接形态：/vod/play/、/index.php/vod/play/、/vodplay/、/xksiplay/ 等自定义前缀、/drama-play、episode_id=。
-var maccmsEpisodeLink = regexp.MustCompile(`(?i)/(?:vod/)?play/|/[a-z0-9_]*play/|/drama-play|episode_id=`)
+var maccmsEpisodeLink = regexp.MustCompile(`(?i)/(?:vod/)?play/|/[a-z0-9_]*play/|/drama-play|episode_id=|/nr/|/bofang/|/vplay/|/zplay/|/mplay/`)
 
 // 详情链接形态：/detail/、/index.php/vod/detail/、/voddetail/、/xksidetail/ 等自定义前缀。
 var maccmsDetailLink = regexp.MustCompile(`(?i)/(?:index\.php/vod/)?(?:detail|vod|show|view|movie|drama|zywview|xzyxvd)/|[a-z0-9_]*detail/`)
@@ -466,6 +466,17 @@ func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string
 		candidates = append(candidates, profile.Category(base, id, page))
 		candidates = append(candidates, base+strings.TrimSuffix(class, ".html")+"-"+strconv.Itoa(page)+".html")
 		candidates = append(candidates, fmt.Sprintf("%s/vodshow/%s-----------%d.html", base, id, page))
+	case profile.Family == "listxx":
+		// listnews/fenlei/… 系分类 ID 为数字，分页形态 /{prefix}/{id}-{page}.html。
+		id := class
+		if matches := regexp.MustCompile(`(\d{1,6})\.html$`).FindStringSubmatch(class); len(matches) > 1 {
+			id = matches[1]
+		} else if matches := regexp.MustCompile(`/(\d{1,6})(?:[-.].*)?\.html$`).FindStringSubmatch(class); len(matches) > 1 {
+			id = matches[1]
+		}
+		if webProviderNumericID.MatchString(id) {
+			candidates = append(candidates, profile.Category(base, id, page))
+		}
 	default:
 		id := class
 		if matches := regexp.MustCompile(`(\d{1,6})\.html$`).FindStringSubmatch(class); len(matches) > 1 {
@@ -884,15 +895,19 @@ func maccmsUnescapeJS(value string) string {
 }
 
 type maccmsCustomProfile struct {
-	Family     string // "indexphp" / "myui" / "unknown"
+	Family     string // "indexphp" / "myui" / "listxx" / "unknown"
 	TypePrefix string // myui 系分类路径前缀（vodtype / xksitype）
-	Categories []maccmsCategorySignal
-	DetailFmts []string
+	// CategoryPrefix / DetailPrefix 是 listxx 系（listnews/fenlei/… + news/nr 等）的路径段，
+	// 由首页导航与详情链接推导得出。
+	CategoryPrefix string
+	DetailPrefix   string
+	Categories     []maccmsCategorySignal
+	DetailFmts     []string
 	// home 缓存首页文档，供通用链接抽取兜底复用，避免重复抓首页。
 	home *html.Node
-	Category   func(base, category string, page int) string
-	AllPage    func(base string, page int) string
-	Search     func(base, query string) string
+	Category func(base, category string, page int) string
+	AllPage  func(base string, page int) string
+	Search   func(base, query string) string
 }
 
 var maccmsCustomProfileCache sync.Map // source id -> maccmsCustomProfile
@@ -925,6 +940,11 @@ var maccmsHomeTypePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)^/type/(\d{1,6})(?:\.html|/)?$`),
 	regexp.MustCompile(`(?i)^/([a-z][a-z0-9_]*)?show/(\d{1,6})(?:[-.].*)?\.html$`),
 	regexp.MustCompile(`(?i)^/list/(\d{1,6})(?:\.html|/)?$`),
+	// 列表/分类段变体（listnews、fenlei、arttype、zylist 等，均为“分类列表”语义，
+	// 不会与详情页前缀冲突），前缀捕获为分类路径段。
+	// 注：movie/tv/art/news 等段既可能是分类也可能是详情，易与详情前缀歧义，不收录于此，
+	// 否则会被 maccmsGenericIsNoisePath 误判为噪声、误杀通用抽取的详情链接。
+	regexp.MustCompile(`(?i)^/((?:listnews|listnew|fenlei|arttype|zylist))/(\d{1,6})(?:\.html|/)?$`),
 }
 
 func maccmsCleanAnchorText(text string) string {
@@ -1034,6 +1054,10 @@ func (d *Downloader) fetchMaccmsCustomCategories(ctx context.Context, source str
 		}
 	}
 	profile := maccmsCustomProfileFor(ctx, d, source, base)
+	if profile.home == nil {
+		// 首页抓取失败（连接超时 / HTTP 错误 / 反爬挑战页），给出明确提示而非笼统报错。
+		return nil, errors.New("站点首页无法访问（连接超时或 HTTP 错误），请确认网址正确且站点可访问")
+	}
 	var categories []nativeCategory
 	for _, signal := range profile.Categories {
 		if signal.ID == "" || signal.Name == "" {
@@ -1046,7 +1070,7 @@ func (d *Downloader) fetchMaccmsCustomCategories(ctx context.Context, source str
 		if profile.Family != "unknown" || profile.TypePrefix != "" {
 			return nil, nil
 		}
-		return nil, errors.New("未在首页识别到分类导航")
+		return nil, errors.New("未能在首页识别到分类导航：该站点不是标准 MacCMS 模板，暂不支持作为自定义源")
 	}
 	return categories, nil
 }
@@ -1082,12 +1106,18 @@ func fetchMaccmsCustomProfile(ctx context.Context, d *Downloader, base string) m
 		categories = maccmsGenericCategories(document, base)
 	}
 	profile.Categories = categories
-	// 出现 xxxtype/N.html 形态导航即 myui 家族（含自定义前缀），否则 indexphp 家族。
-	// 导航没抓到名称时，只要能从详情页链接推出前缀，也按 myui 家族处理，
-	// 至少保证目录/详情/搜索能按对模板走，而不是退回 unknown 全靠猜。
-	if typePrefix != "" {
+	// 首页链接推导详情页前缀（如 gzmzpx 的 /news/NNNNN.html）。
+	detailPrefix := maccmsCustomHomeDetailPrefix(document, typePrefix)
+	// 分类导航前缀不含 "type" 后缀的（listnews / fenlei / …）归为 listxx 家族；
+	// 含 "type" 后缀（vodtype / xksitype / newstype）或仅由详情链推导出前缀的归 myui。
+	switch {
+	case typePrefix != "" && !strings.HasSuffix(typePrefix, "type"):
+		profile.Family = "listxx"
+		profile.CategoryPrefix = typePrefix
+		profile.DetailPrefix = detailPrefix
+	case typePrefix != "":
 		profile.Family = "myui"
-	} else {
+	default:
 		profile.Family = "indexphp"
 	}
 	switch profile.Family {
@@ -1123,8 +1153,62 @@ func fetchMaccmsCustomProfile(ctx context.Context, d *Downloader, base string) m
 		profile.AllPage = func(base string, page int) string {
 			return fmt.Sprintf("%s/%sshow/1-----------%d.html", base, dash, page)
 		}
+	case "listxx":
+		// listnews/fenlei/… 系：分类 /{catPrefix}/{id}.html、分页 /{catPrefix}/{id}-{page}.html；
+		// 详情 /{detPrefix}/{id}.html；搜索走标准 MacCMS search.php。
+		catPrefix := profile.CategoryPrefix
+		detPrefix := profile.DetailPrefix
+		if detPrefix == "" {
+			detPrefix = "news"
+		}
+		profile.DetailFmts = []string{
+			fmt.Sprintf("%%s/%s/%%s.html", detPrefix),
+			"%s/index.php/vod/detail/id/%s.html",
+			"%s/detail/%s.html",
+		}
+		profile.Category = func(base, category string, page int) string {
+			if page <= 1 {
+				return fmt.Sprintf("%s/%s/%s.html", base, catPrefix, category)
+			}
+			return fmt.Sprintf("%s/%s/%s-%d.html", base, catPrefix, category, page)
+		}
+		profile.AllPage = func(base string, page int) string {
+			if page <= 1 {
+				return base + "/"
+			}
+			return fmt.Sprintf("%s/%s/1-%d.html", base, catPrefix, page)
+		}
+		profile.Search = func(base, query string) string {
+			return fmt.Sprintf("%s/search.php?searchword=%s", base, url.PathEscape(query))
+		}
 	}
 	return profile
+}
+
+// maccmsCustomHomeDetailPrefix 从首页链接推导详情页路径段（如 gzmzpx 的 news）。
+// 分类链接一般是 1~2 位数字 ID，详情链接是 4 位以上数字 ID，据此区分。
+func maccmsCustomHomeDetailPrefix(document *html.Node, categoryPrefix string) string {
+	if document == nil {
+		return ""
+	}
+	pattern := regexp.MustCompile(`^/([a-z][a-z0-9_]*)/(\d{4,})\.html$`)
+	for _, anchor := range providerHTMLNodes(document, func(node *html.Node) bool { return node.Data == "a" }) {
+		href := strings.TrimSpace(providerHTMLAttr(anchor, "href"))
+		parsed, err := url.Parse(href)
+		if err != nil || parsed.Path == "" {
+			continue
+		}
+		matches := pattern.FindStringSubmatch(parsed.Path)
+		if len(matches) < 3 {
+			continue
+		}
+		seg := matches[1]
+		if seg == categoryPrefix || seg == "" {
+			continue
+		}
+		return seg
+	}
+	return ""
 }
 
 func maccmsNormalizePlaybackURL(raw string) string {
