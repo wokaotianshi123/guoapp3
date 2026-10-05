@@ -87,7 +87,7 @@ func (engine *nativeEngine) loadSourceRecords() {
 		return
 	}
 	for source, record := range records {
-		if !isHuangguoProviderSource(source) {
+		if !isHuangguoProviderSource(source) && !engine.isCustomMaccmsSourceKnown(source) {
 			continue
 		}
 		if record.Running {

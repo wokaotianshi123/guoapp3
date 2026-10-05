@@ -36,6 +36,7 @@ type Config struct {
 	GuipianURL       string
 	HanxiaoquanURL   string
 	IkanbotURL       string
+	A123URL          string
 	Token            string
 	AESKeyHex        string
 	InterfaceKey     string
@@ -287,9 +288,11 @@ func newNativeEngine(directory string) (*nativeEngine, error) {
 	engine.loadResourceSettings()
 	d.loadRankingCache()
 	engine.loadCatalogCache()
-	engine.loadSourceRecords()
+	// 自定义源注册表必须先于 sources.json 加载：
+	// loadSourceRecords 里的 isHuangguoProviderSource 要能认出 custom:<hash> 记录才不会丢任务状态。
 	engine.customRegistry = newCustomMaccmsRegistry(directory)
 	engine.customRegistry.load()
+	engine.loadSourceRecords()
 	engine.covers = newNativeCoverCache(directory, d)
 	engine.downloads = newNativeDownloads(engine)
 	return engine, nil
@@ -354,12 +357,18 @@ func nativeDispatch(input nativeInput) (any, error) {
 	nativeState.Lock()
 	if input.Action == "initialize" {
 		if nativeState.engine == nil {
+			// newNativeEngine 内部会经 isHuangguoProviderSource 读取全局引擎（自定义源判定），
+			// 持锁创建会自死锁；先解锁创建，再上锁安装，并发 initialize 时以先装上的引擎为准。
+			nativeState.Unlock()
 			engine, err := newNativeEngine(input.Directory)
+			nativeState.Lock()
 			if err != nil {
 				nativeState.Unlock()
 				return nil, err
 			}
-			nativeState.engine = engine
+			if nativeState.engine == nil {
+				nativeState.engine = engine
+			}
 		}
 		nativeState.Unlock()
 		return map[string]any{"version": "0.2.17", "standalone": true, "allSources": buildAllSources == "true"}, nil
@@ -634,6 +643,24 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 		}
 		return result, nil
 	}
+	if query != "" && (source == sourceA123 || source == sourceIkanbot) {
+		var items []Drama
+		var more bool
+		var err error
+		if source == sourceA123 {
+			items, more, err = d.fetchA123CatalogPage(ctx, page, "", query)
+		} else {
+			items, more, err = d.fetchIkanbotCatalogPage(ctx, page, "", query)
+		}
+		if err != nil {
+			return result, err
+		}
+		for _, drama := range items {
+			result.Items = append(result.Items, nativeNormalize(drama))
+		}
+		result.HasMore = more
+		return result, nil
+	}
 	if query != "" {
 		engine.mu.Lock()
 		items := append([]nativeDrama{}, engine.catalogs[source]...)
@@ -714,6 +741,8 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 		items, result.HasMore, err = d.fetchHanxiaoquanCatalogPage(ctx, page, category, "")
 	case sourceIkanbot:
 		items, result.HasMore, err = d.fetchIkanbotCatalogPage(ctx, page, category, "")
+	case sourceA123:
+		items, result.HasMore, err = d.fetchA123CatalogPage(ctx, page, category, "")
 	case sourceHuangguoVideo:
 		address := fmt.Sprintf("%s/videos?page=%d", d.providerBaseURL(source), page)
 		if category != "" {
@@ -735,7 +764,7 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 	if err != nil && len(items) == 0 {
 		return result, err
 	}
-	if len(items) == 0 && page == 1 && source != sourceHuangju && source != sourceYeguo && source != sourceDSD && source != sourceSorani && source != sourceGuipian && source != sourceHanxiaoquan && source != sourceIkanbot && !isDuanjuProviderSource(source) {
+	if len(items) == 0 && page == 1 && source != sourceHuangju && source != sourceYeguo && source != sourceDSD && source != sourceSorani && source != sourceGuipian && source != sourceHanxiaoquan && source != sourceIkanbot && source != sourceA123 && !isDuanjuProviderSource(source) {
 		return result, errors.New("站源暂未返回剧集，请稍后刷新")
 	}
 	if err != nil {
@@ -783,6 +812,8 @@ func (engine *nativeEngine) nativeDetail(ctx context.Context, drama nativeDrama)
 		raw, chapters, err = engine.downloader.fetchHanxiaoquanDetail(ctx, sourceID)
 	case sourceIkanbot:
 		raw, chapters, err = engine.downloader.fetchIkanbotDetail(ctx, sourceID)
+	case sourceA123:
+		raw, chapters, err = engine.downloader.fetchA123Detail(ctx, sourceID)
 	default:
 		if isDuanjuProviderSource(source) {
 			raw, chapters, err = engine.downloader.fetchDuanjuDetail(ctx, source, sourceID)

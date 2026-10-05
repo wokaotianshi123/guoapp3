@@ -236,6 +236,16 @@ func (engine *nativeEngine) updateCustomMaccmsSource(id, name, base string) (cus
 	return record, nil
 }
 
+// isCustomMaccmsSourceKnown 判断源是否已在指定引擎的注册表里。
+// 引擎创建阶段（如 loadSourceRecords）全局快照尚未就绪，必须走实例自身的注册表。
+func (engine *nativeEngine) isCustomMaccmsSourceKnown(source string) bool {
+	if !isCustomMaccmsSource(source) || engine == nil || engine.customRegistry == nil {
+		return false
+	}
+	_, found := engine.customRegistry.get(canonicalProviderSource(source))
+	return found
+}
+
 // resolveCustomMaccmsSource 供站源注册表回退，返回指定自定义源的规格。
 func customMaccmsSpecFor(id string) (duanjuSourceSpec, bool) {
 	engine := nativeEngineSnapshot()

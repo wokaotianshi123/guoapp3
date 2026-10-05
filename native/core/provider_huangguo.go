@@ -32,6 +32,7 @@ const (
 	sourceGuipian       = "guipian"
 	sourceHanxiaoquan   = "hanxiaoquan"
 	sourceIkanbot       = "ikanbot"
+	sourceA123          = "a123"
 
 	providerMaxBodyBytes = 20 * 1024 * 1024
 	providerTimeout      = 12 * time.Second
@@ -104,7 +105,7 @@ func splitProviderDramaID(id string) (source, sourceID string, ok bool) {
 
 func isHuangguoProviderSource(source string) bool {
 	switch canonicalProviderSource(source) {
-	case sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo, sourceHuangju, sourceYeguo, sourceDSD, sourceCloudFront, sourceSorani, sourceGuipian, sourceHanxiaoquan, sourceIkanbot:
+	case sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo, sourceHuangju, sourceYeguo, sourceDSD, sourceCloudFront, sourceSorani, sourceGuipian, sourceHanxiaoquan, sourceIkanbot, sourceA123:
 		return true
 	default:
 		return isDuanjuProviderSource(source)
@@ -138,6 +139,8 @@ func canonicalProviderSource(source string) string {
 		return sourceHanxiaoquan
 	case "ikanbot", "ikanbot.com", "www.ikanbot.com", "www1.ikanbot.com":
 		return sourceIkanbot
+	case "a123", "a123tv", "a123tv.com", "www.a123tv.com":
+		return sourceA123
 	}
 	if canonical, found := duanjuSourceAliases[key]; found {
 		return canonical
@@ -262,6 +265,9 @@ func (d *Downloader) GetHuangguoChapters(ctx context.Context, source, sourceID s
 		return drama.DisplayTitle(), chapters, err
 	case sourceIkanbot:
 		drama, chapters, err := d.fetchIkanbotDetail(ctx, sourceID)
+		return drama.DisplayTitle(), chapters, err
+	case sourceA123:
+		drama, chapters, err := d.fetchA123Detail(ctx, sourceID)
 		return drama.DisplayTitle(), chapters, err
 	default:
 		if isDuanjuProviderSource(source) {
