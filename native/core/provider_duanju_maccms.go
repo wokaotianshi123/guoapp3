@@ -424,12 +424,22 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 // 先取首页（page<=1 且无分类），page>1 或带分类时按模板家族探测出的 URL 形态逐候选尝试。
 func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string, page int, category string) ([]Drama, bool, error) {
 	base := d.duanjuBaseURL(source)
+	// 标准 JSON API 优先：命中就不必再猜页面模板。
+	if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
+		if items, hasMore, err := d.fetchMaccmsAPICatalog(ctx, source, endpoint, base, page, category); err == nil {
+			return items, hasMore, nil
+		}
+	}
 	if page <= 1 && strings.TrimSpace(category) == "" {
 		document, _, err := d.fetchProviderPage(ctx, base+"/", base+"/", duanjuUserAgent)
 		if err != nil {
 			return nil, false, err
 		}
 		items := maccmsCards(document, source, base)
+		if len(items) == 0 {
+			// 模板 class 不认识时，退到通用链接抽取（扫所有 <a href> 找详情链接）。
+			items = maccmsGenericItems(document, source, base, 0)
+		}
 		return items, len(items) > 0, nil
 	}
 	profile := maccmsCustomProfileFor(ctx, d, source, base)
@@ -485,6 +495,9 @@ func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string
 			continue
 		}
 		items := maccmsCards(document, source, base)
+		if len(items) == 0 {
+			items = maccmsGenericItems(document, source, base, 0)
+		}
 		if len(items) > 0 {
 			return items, true, nil
 		}
@@ -500,6 +513,12 @@ func (d *Downloader) fetchMaccmsDetail(ctx context.Context, source, sourceID str
 	base := d.duanjuBaseURL(source)
 	candidates := maccmsDetailCandidates(source, base, sourceID)
 	if isCustomMaccmsSource(source) {
+		// 标准 JSON API 优先：详情与播放地址一次拿全，省掉播放页解析。
+		if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
+			if drama, chapters, apiErr := d.fetchMaccmsAPIDetail(ctx, source, endpoint, base, sourceID); apiErr == nil {
+				return drama, chapters, nil
+			}
+		}
 		profile := maccmsCustomProfileFor(ctx, d, source, base)
 		candidates = append(profile.detailCandidates(base, sourceID), candidates...)
 		candidates = append(candidates, fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
@@ -721,6 +740,12 @@ func (d *Downloader) searchMaccms(ctx context.Context, source, query string) ([]
 	case source == sourceWangguo:
 		address = fmt.Sprintf("%s/search/%s----------1---.html", base, url.PathEscape(query))
 	case isCustomMaccmsSource(source):
+		// 标准 JSON API 优先：搜索关键字直接交给接口。
+		if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
+			if items, apiErr := d.fetchMaccmsAPISearch(ctx, source, endpoint, base, query); apiErr == nil && len(items) > 0 {
+				return items, nil
+			}
+		}
 		// 自定义站点：按模板家族使用对应搜索路径（index.php / vodsearch / xksisearch 等）。
 		profile := maccmsCustomProfileFor(ctx, d, source, base)
 		address = profile.Search(base, query)
@@ -741,11 +766,17 @@ func (d *Downloader) searchMaccms(ctx context.Context, source, query string) ([]
 	}
 	items := maccmsCards(document, source, base)
 	if len(items) == 0 && isCustomMaccmsSource(source) {
-		// 首页形态没出结果时，再用 index.php 搜索兜底一次。
+		// 结果页模板不认识时，先试通用链接抽取，再退回 index.php 搜索形态。
+		items = maccmsGenericItems(document, source, base, 0)
+	}
+	if len(items) == 0 && isCustomMaccmsSource(source) {
 		fallback := fmt.Sprintf("%s/index.php/vod/search/wd/%s.html", base, url.PathEscape(query))
 		if !strings.EqualFold(fallback, address) {
 			if retry, _, retryErr := d.fetchProviderPage(ctx, fallback, base+"/", duanjuUserAgent); retryErr == nil {
 				items = maccmsCards(retry, source, base)
+				if len(items) == 0 {
+					items = maccmsGenericItems(retry, source, base, 0)
+				}
 			}
 		}
 	}
@@ -857,6 +888,8 @@ type maccmsCustomProfile struct {
 	TypePrefix string // myui 系分类路径前缀（vodtype / xksitype）
 	Categories []maccmsCategorySignal
 	DetailFmts []string
+	// home 缓存首页文档，供通用链接抽取兜底复用，避免重复抓首页。
+	home *html.Node
 	Category   func(base, category string, page int) string
 	AllPage    func(base string, page int) string
 	Search     func(base, query string) string
@@ -874,10 +907,25 @@ func (p maccmsCustomProfile) detailCandidates(base, id string) []string {
 
 var (
 	maccmsHomeCategoryLink = regexp.MustCompile(`(?i)^/(?:index\.php/)?vod/type/id/(\d{1,6})\.html$`)
-	maccmsHomeTypeLink     = regexp.MustCompile(`(?i)^/([a-z][a-z0-9_]*type)/(\d{1,6})\.html$`)
 	maccmsAnchorTag        = regexp.MustCompile(`(?s)<[^>]*>`)
 	maccmsDetailSegment    = regexp.MustCompile(`(?i)^/([a-z0-9_]*detail)/`)
 )
+
+// maccmsHomeTypePatterns 是分类导航链接的常见形态。自定义站点模板五花八门，
+// 单靠一种正则识别率很低，这里把实测出现过的形态都列出来逐个匹配：
+//   - /vodtype/1.html、/type/1.html、/xksitype/1.html（myui 系，前缀任意）
+//   - /index.php/vod/type/id/1.html、/index.php/vod/type/1.html（indexphp 系）
+//   - /show/1-----------.html、/vodshow/1.html、/list/1.html（macplus 等）
+// 第 1 组固定为分类 ID，第 2 组（若有）为分类路径前缀。
+var maccmsHomeTypePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^/(?:index\.php/)?vod/type/id/(\d{1,6})\.html$`),
+	regexp.MustCompile(`(?i)^/(?:index\.php/)?vod/type/(\d{1,6})(?:\.html|/)?$`),
+	regexp.MustCompile(`(?i)^/index\.php/vod/show/id/(\d{1,6})\.html$`),
+	regexp.MustCompile(`(?i)^/([a-z][a-z0-9_]*type)/(\d{1,6})(?:\.html|/)?$`),
+	regexp.MustCompile(`(?i)^/type/(\d{1,6})(?:\.html|/)?$`),
+	regexp.MustCompile(`(?i)^/([a-z][a-z0-9_]*)?show/(\d{1,6})(?:[-.].*)?\.html$`),
+	regexp.MustCompile(`(?i)^/list/(\d{1,6})(?:\.html|/)?$`),
+}
 
 func maccmsCleanAnchorText(text string) string {
 	text = strings.TrimSpace(maccmsAnchorTag.ReplaceAllString(text, ""))
@@ -911,25 +959,42 @@ func maccmsCustomHomeSignals(document *html.Node) ([]maccmsCategorySignal, strin
 			continue
 		}
 		path := parsed.Path
-		if path == "" || !strings.HasSuffix(path, ".html") {
+		if path == "" {
+			continue
+		}
+		// 导航链接未必带 .html 后缀（如 /vodtype/1/），这里放宽要求，
+		// 只要形态能对上分类路径即可，避免整站识别不出来。
+		if !strings.HasSuffix(path, ".html") && !strings.HasSuffix(path, "/") &&
+			!maccmsDetailPath.MatchString(path+"/") {
 			continue
 		}
 		name := maccmsCleanAnchorText(providerHTMLText(anchor))
-		if matches := maccmsHomeCategoryLink.FindStringSubmatch(path); len(matches) > 1 {
-			if name != "" && !seen[matches[1]] {
-				seen[matches[1]] = true
-				categories = append(categories, maccmsCategorySignal{ID: matches[1], Name: name})
-			}
-			continue
+		if name == "" {
+			name = maccmsCleanAnchorText(providerHTMLAttr(anchor, "title"))
 		}
-		if matches := maccmsHomeTypeLink.FindStringSubmatch(path); len(matches) > 2 {
-			if typePrefix == "" {
-				typePrefix = matches[1]
+		matched := false
+		for _, pattern := range maccmsHomeTypePatterns {
+			matches := pattern.FindStringSubmatch(path)
+			if len(matches) < 2 {
+				continue
 			}
-			if name != "" && !seen[matches[2]] {
-				seen[matches[2]] = true
-				categories = append(categories, maccmsCategorySignal{ID: matches[2], Name: name})
+			id := matches[1]
+			prefix := ""
+			if len(matches) > 2 {
+				prefix = matches[1]
+				id = matches[2]
 			}
+			if prefix != "" && typePrefix == "" {
+				typePrefix = prefix
+			}
+			if name != "" && !seen[id] {
+				seen[id] = true
+				categories = append(categories, maccmsCategorySignal{ID: id, Name: name})
+			}
+			matched = true
+			break
+		}
+		if matched {
 			continue
 		}
 		if firstDetail == "" && maccmsDetailPath.MatchString(path) {
@@ -962,6 +1027,12 @@ func (d *Downloader) fetchMaccmsCustomCategories(ctx context.Context, source str
 	if base == "" {
 		return nil, errors.New("站源地址不可用")
 	}
+	// 先试标准 JSON API：分类是接口自带字段，比首页导航识别稳得多。
+	if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
+		if categories := d.fetchMaccmsAPICategories(ctx, endpoint, base); len(categories) > 0 {
+			return categories, nil
+		}
+	}
 	profile := maccmsCustomProfileFor(ctx, d, source, base)
 	var categories []nativeCategory
 	for _, signal := range profile.Categories {
@@ -971,6 +1042,10 @@ func (d *Downloader) fetchMaccmsCustomCategories(ctx context.Context, source str
 		categories = append(categories, nativeCategory{ID: signal.ID, Name: signal.Name})
 	}
 	if len(categories) == 0 {
+		// 认不出导航但认得出模板时不再报死：返回空分类，让「全部站源」照常可用。
+		if profile.Family != "unknown" || profile.TypePrefix != "" {
+			return nil, nil
+		}
 		return nil, errors.New("未在首页识别到分类导航")
 	}
 	return categories, nil
@@ -1000,12 +1075,16 @@ func fetchMaccmsCustomProfile(ctx context.Context, d *Downloader, base string) m
 	if err != nil || document == nil {
 		return profile
 	}
+	profile.home = document
 	categories, typePrefix := maccmsCustomHomeSignals(document)
 	if len(categories) == 0 {
-		return profile
+		// 导航链接形态陌生时改用统计法：同骨架链接成批出现且多数无海报 → 分类。
+		categories = maccmsGenericCategories(document, base)
 	}
 	profile.Categories = categories
 	// 出现 xxxtype/N.html 形态导航即 myui 家族（含自定义前缀），否则 indexphp 家族。
+	// 导航没抓到名称时，只要能从详情页链接推出前缀，也按 myui 家族处理，
+	// 至少保证目录/详情/搜索能按对模板走，而不是退回 unknown 全靠猜。
 	if typePrefix != "" {
 		profile.Family = "myui"
 	} else {
