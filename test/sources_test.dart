@@ -64,7 +64,7 @@ class SourceFixtureRepository extends FixtureRepository {
 
 void main() {
   test(
-    'twelve short-drama sources are registered and paged search is scoped',
+    'eleven short-drama sources are registered and paged search is scoped',
     () {
       const expected = {
         'yaguo',
@@ -77,7 +77,6 @@ void main() {
         'niuguo',
         'wangguo',
         'faguo',
-        'piguo',
         'wuguo',
       };
       final actual = SourceSite.duanjuValues.map((source) => source.id).toSet();
@@ -101,7 +100,6 @@ void main() {
           'niuguo',
           'wangguo',
           'faguo',
-          'piguo',
           'wuguo',
         }),
       );
