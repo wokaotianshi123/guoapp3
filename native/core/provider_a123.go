@@ -43,7 +43,6 @@ var a123Categories = []nativeCategory{
 	{ID: "11", Name: "连续剧"},
 	{ID: "12", Name: "综艺"},
 	{ID: "13", Name: "动漫"},
-	{ID: "15", Name: "福利"},
 }
 
 var (

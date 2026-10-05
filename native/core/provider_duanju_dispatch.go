@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 func (d *Downloader) fetchDuanjuCategories(ctx context.Context, source string) ([]nativeCategory, error) {
@@ -51,7 +53,7 @@ func (d *Downloader) fetchDuanjuCatalogPage(ctx context.Context, source string, 
 		return d.fetchXingguoCatalogPage(ctx, page, category)
 	case sourceNiuguo:
 		return d.fetchNiuguoCatalogPage(ctx, page, category)
-	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo, sourcePiguo:
+	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo:
 		return d.fetchMaccmsCatalogPage(ctx, source, page, category)
 	default:
 		if isCustomMaccmsSource(source) {
@@ -78,7 +80,7 @@ func (d *Downloader) fetchDuanjuDetail(ctx context.Context, source, sourceID str
 		return d.fetchXingguoDetail(ctx, sourceID)
 	case sourceNiuguo:
 		return d.fetchNiuguoDetail(ctx, sourceID)
-	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo, sourcePiguo:
+	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo:
 		return d.fetchMaccmsDetail(ctx, source, sourceID)
 	default:
 		if isCustomMaccmsSource(source) {
@@ -105,7 +107,7 @@ func (d *Downloader) searchDuanju(ctx context.Context, source, query string) ([]
 		return d.searchXingguo(ctx, query)
 	case sourceNiuguo:
 		return d.searchNiuguo(ctx, query)
-	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo, sourcePiguo:
+	case sourceHuaguo, sourceFaguo, sourceWuguo, sourceWangguo:
 		return d.searchMaccms(ctx, source, query)
 	default:
 		if isCustomMaccmsSource(source) {
@@ -160,13 +162,47 @@ func (d *Downloader) resolveDuanjuMedia(ctx context.Context, task Task) (provide
 			if err != nil {
 				return providerMedia{}, err
 			}
-			return d.prepareWebProviderMedia(ctx, resolved, name)
+			prepared, err := d.prepareWebProviderMedia(ctx, resolved, name)
+			if err == nil {
+				return prepared, nil
+			}
+			// 默认线路可能被源站下架或限速（返回 404 / 403），自动改用同一集的其他线路。
+			if fallback, ok := d.prepareWebProviderRouteFallback(ctx, resolved, name); ok {
+				return fallback, nil
+			}
+			return providerMedia{}, err
 		}
 	}
 	if !isProviderHTTPMediaURL(address) {
 		return providerMedia{}, fmt.Errorf("%s未返回有效播放地址，请刷新章节后重试", name)
 	}
 	return d.prepareWebProviderMedia(ctx, providerMedia{URL: address, Referer: referer}, name)
+}
+
+// prepareWebProviderRouteFallback 在主线路拿不到可播内容时，依次试用备选线路，
+// 首个可播线路提为主地址，其余线路（含原主线路）继续留在备选列表里供手动切换。
+func (d *Downloader) prepareWebProviderRouteFallback(ctx context.Context, media providerMedia, name string) (providerMedia, bool) {
+	if len(media.Variants) == 0 {
+		return providerMedia{}, false
+	}
+	for index, variant := range media.Variants {
+		if !isProviderHTTPMediaURL(variant.URL) {
+			continue
+		}
+		prepared, err := d.prepareWebProviderMedia(ctx, providerMedia{URL: variant.URL, Referer: variant.Referer}, name)
+		if err != nil {
+			continue
+		}
+		remaining := make([]providerMedia, 0, len(media.Variants))
+		remaining = append(remaining, media.Variants[:index]...)
+		remaining = append(remaining, media.Variants[index+1:]...)
+		if isProviderHTTPMediaURL(media.URL) {
+			remaining = append([]providerMedia{{URL: media.URL, Referer: media.Referer}}, remaining...)
+		}
+		prepared.Variants = remaining
+		return prepared, true
+	}
+	return providerMedia{}, false
 }
 
 func duanjuLooksLikeMedia(address string) bool {
@@ -181,7 +217,11 @@ func (d *Downloader) resolveDuanjuWebPage(ctx context.Context, source, pageURL, 
 	}
 	address := maccmsNormalizePlaybackURL(maccmsPlayerURL(body))
 	if isProviderHTTPMediaURL(address) {
-		return providerMedia{URL: address, Referer: pageURL}, nil
+		media := providerMedia{URL: address, Referer: pageURL}
+		// 同一集通常有多条线路（m3u8/云播/各视频站），详情只展示一条线路的集数，
+		// 其余线路在这里补齐，播放页就能用「线路 N」切换。
+		media.Variants = d.collectMaccmsRouteVariants(ctx, pageURL, address)
+		return media, nil
 	}
 	// macplus 模板（如 MGMGTV）给出的是加密串：走 /static/player/<from>.js 的 iframe 云解析拿真实 m3u8。
 	fields := maccmsPlayerFields(body)
@@ -206,19 +246,25 @@ var (
 	maccmsPlayMyuiTail   = regexp.MustCompile(`(?i)^(.*/\d+)-(\d+)-(\d+\.html)$`)
 )
 
-// resolveMaccmsAlternateRoutes 在当前播放页云解析失败时，尝试同一剧集的其他线路（sid）。
+const (
+	// maccmsMaxRouteSID 是探测线路号的上限（站点线路通常不超过 10 条）。
+	maccmsMaxRouteSID = 12
+	// maccmsMaxRouteVariants 是最多采集的备选线路数量（不含当前线路）。
+	maccmsMaxRouteVariants = 3
+)
+
+// maccmsAlternateRoutePaths 由当前播放页 URL 生成同集其他线路（sid）的页面路径。
 // macplus/myui 播放页 URL 中 sid 即线路号，结构固定，直接替换 sid 构造其他线路播放页即可
-// （播放页里的 detail 链接多为推荐位，不可靠）。逐条抓页走云解析，返回首个成功的 m3u8。
-func (d *Downloader) resolveMaccmsAlternateRoutes(ctx context.Context, pageURL string) string {
+// （播放页里的 detail 链接多为推荐位，不可靠）。
+func maccmsAlternateRoutePaths(pageURL string) (siteBase string, paths []string) {
 	parsed, err := url.Parse(pageURL)
 	if err != nil || parsed.Host == "" {
-		return ""
+		return "", nil
 	}
 	currentSID := -1
-	var paths []string
 	if matches := maccmsPlaySIDSegment.FindStringSubmatch(parsed.Path); len(matches) > 1 {
 		currentSID, _ = strconv.Atoi(matches[1])
-		for sid := 1; sid <= 9; sid++ {
+		for sid := 1; sid <= maccmsMaxRouteSID; sid++ {
 			if sid == currentSID {
 				continue
 			}
@@ -226,7 +272,7 @@ func (d *Downloader) resolveMaccmsAlternateRoutes(ctx context.Context, pageURL s
 		}
 	} else if matches := maccmsPlayMyuiTail.FindStringSubmatch(parsed.Path); len(matches) > 1 {
 		currentSID, _ = strconv.Atoi(matches[2])
-		for sid := 1; sid <= 9; sid++ {
+		for sid := 1; sid <= maccmsMaxRouteSID; sid++ {
 			if sid == currentSID {
 				continue
 			}
@@ -234,9 +280,18 @@ func (d *Downloader) resolveMaccmsAlternateRoutes(ctx context.Context, pageURL s
 		}
 	}
 	if len(paths) == 0 {
+		return "", nil
+	}
+	return parsed.Scheme + "://" + parsed.Host, paths
+}
+
+// resolveMaccmsAlternateRoutes 在当前播放页云解析失败时，尝试同一剧集的其他线路（sid）。
+// 逐条抓页走云解析，返回首个成功的 m3u8。
+func (d *Downloader) resolveMaccmsAlternateRoutes(ctx context.Context, pageURL string) string {
+	siteBase, paths := maccmsAlternateRoutePaths(pageURL)
+	if siteBase == "" {
 		return ""
 	}
-	siteBase := parsed.Scheme + "://" + parsed.Host
 	for _, path := range paths {
 		altURL := siteBase + path
 		altBody, err := d.fetchProviderText(ctx, altURL, pageURL)
@@ -253,6 +308,64 @@ func (d *Downloader) resolveMaccmsAlternateRoutes(ctx context.Context, pageURL s
 		}
 	}
 	return ""
+}
+
+// maccmsResolveRoutePage 抓取一条线路的播放页并返回可播放地址（明文直取，加密串走云解析）。
+func (d *Downloader) maccmsResolveRoutePage(ctx context.Context, altURL, referer string) string {
+	body, err := d.fetchProviderText(ctx, altURL, referer)
+	if err != nil || body == "" {
+		return ""
+	}
+	if address := maccmsNormalizePlaybackURL(maccmsPlayerURL(body)); isProviderHTTPMediaURL(address) {
+		return address
+	}
+	fields := maccmsPlayerFields(body)
+	encrypted := fields["url"]
+	if encrypted == "" || strings.HasPrefix(strings.ToLower(encrypted), "http") {
+		return ""
+	}
+	if parsed := d.resolveMaccmsCloudParse(ctx, body, encrypted, altURL); parsed != "" {
+		return maccmsNormalizePlaybackURL(parsed)
+	}
+	return ""
+}
+
+// collectMaccmsRouteVariants 采集同一集其他线路的播放地址，作为播放页的备选线路。
+// 详情页只保留一条线路的集数，线路切换靠这里补齐；采集失败不影响主线路，只做尽力而为。
+func (d *Downloader) collectMaccmsRouteVariants(ctx context.Context, pageURL, primary string) []providerMedia {
+	siteBase, paths := maccmsAlternateRoutePaths(pageURL)
+	if siteBase == "" {
+		return nil
+	}
+	if len(paths) > maccmsMaxRouteVariants {
+		paths = paths[:maccmsMaxRouteVariants]
+	}
+	// 备选线路只是锦上添花，给一个总时限，避免拖慢主线路的解析返回。
+	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	found := make([]string, len(paths))
+	var waiter sync.WaitGroup
+	for index, path := range paths {
+		waiter.Add(1)
+		go func(slot int, address string) {
+			defer waiter.Done()
+			found[slot] = d.maccmsResolveRoutePage(ctx, address, pageURL)
+		}(index, siteBase+path)
+	}
+	waiter.Wait()
+	seen := map[string]bool{}
+	if primary != "" {
+		seen[primary] = true
+	}
+	var variants []providerMedia
+	for index, address := range found {
+		if !isProviderHTTPMediaURL(address) || seen[address] {
+			continue
+		}
+		seen[address] = true
+		variants = append(variants, providerMedia{URL: address, Referer: siteBase + paths[index]})
+	}
+	return variants
 }
 
 func (d *Downloader) duanjuSourceProbe(ctx context.Context, source string) (string, error) {

@@ -17,7 +17,6 @@ const (
 	sourceNiuguo  = "niuguo"
 	sourceWangguo = "wangguo"
 	sourceFaguo   = "faguo"
-	sourcePiguo   = "piguo"
 	sourceWuguo   = "wuguo"
 
 	duanjuMaxBodyBytes = 8 * 1024 * 1024
@@ -39,7 +38,6 @@ var (
 	niuguoParseURL2 = "http://101.42.92.211:5560"
 	wangguoBaseURL  = "https://www.duanju2.com"
 	faguoBaseURL    = "https://www.xzyx168.com"
-	piguoBaseURL    = "https://ptt.red"
 	wuguoBaseURL    = "https://www.duanju55.com"
 )
 
@@ -66,7 +64,6 @@ var duanjuProviderCatalog = []duanjuSourceSpec{
 	{ID: sourceNiuguo, Name: "牛果", Base: niuguoBaseURL, Kind: "api", Searcher: true, Paged: true},
 	{ID: sourceWangguo, Name: "网果", Base: wangguoBaseURL, Kind: "maccms", Searcher: true, Paged: true},
 	{ID: sourceFaguo, Name: "发果", Base: faguoBaseURL, Kind: "maccms", Searcher: true, Paged: true},
-	{ID: sourcePiguo, Name: "皮果", Base: piguoBaseURL, Kind: "maccms", Searcher: true, Paged: true, Browser: true},
 	{ID: sourceWuguo, Name: "伍果", Base: wuguoBaseURL, Kind: "maccms", Searcher: true, Paged: true},
 }
 
@@ -99,7 +96,6 @@ var duanjuSourceAliases = map[string]string{
 	"niuguo": "niuguo", "niuniu": sourceNiuguo, "牛牛": sourceNiuguo,
 	"wangguo": "wangguo", "duanjuwangzhan": sourceWangguo, "短剧网站": sourceWangguo, "www.duanju2.com": sourceWangguo,
 	"faguo": "faguo", "168": sourceFaguo, "xzyx168": sourceFaguo, "www.xzyx168.com": sourceFaguo,
-	"piguo": "piguo", "ptt": sourcePiguo, "ptt.red": sourcePiguo,
 	"wuguo": "wuguo", "wuwu": sourceWuguo, "五五": sourceWuguo, "www.duanju55.com": sourceWuguo,
 }
 
@@ -170,8 +166,6 @@ func duanjuSourceForHost(host string) string {
 		return sourceWangguo
 	case host == "www.xzyx168.com" || host == "xzyx168.com":
 		return sourceFaguo
-	case host == "ptt.red" || host == "www.ptt.red":
-		return sourcePiguo
 	case host == "www.duanju55.com" || host == "duanju55.com":
 		return sourceWuguo
 	default:
@@ -243,17 +237,6 @@ var duanjuStaticCategories = map[string][]duanjuCategory{
 		{ID: "1159", Name: "系统"},
 		{ID: "1147", Name: "总裁"},
 		{ID: "943", Name: "职场商战"},
-	},
-	sourcePiguo: {
-		{ID: "67", Name: "爽剧"},
-		{ID: "68", Name: "言情"},
-		{ID: "70", Name: "穿越"},
-		{ID: "71", Name: "悬疑"},
-		{ID: "73", Name: "古装"},
-		{ID: "80", Name: "都市"},
-		{ID: "84", Name: "甜宠"},
-		{ID: "85", Name: "恋爱"},
-		{ID: "74", Name: "其他"},
 	},
 	sourceHuaguo: {
 		{ID: "27", Name: "短剧"},

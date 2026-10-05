@@ -34,8 +34,8 @@ func TestDuanjuRegistryKeepsDistinctIdentitiesFromExistingSources(t *testing.T) 
 	for _, source := range existing {
 		seen[source] = true
 	}
-	if len(duanjuProviderCatalog) != 12 {
-		t.Fatalf("duanju catalog should register 12 sources, got %d", len(duanjuProviderCatalog))
+	if len(duanjuProviderCatalog) != 11 {
+		t.Fatalf("duanju catalog should register 11 sources, got %d", len(duanjuProviderCatalog))
 	}
 	for _, spec := range duanjuProviderCatalog {
 		if seen[spec.ID] {
@@ -339,7 +339,7 @@ func TestDuanjuHeguoParsesNextDataWrappedResponses(t *testing.T) {
 }
 
 func TestDuanjuSearchSupportMatchesReferenceScripts(t *testing.T) {
-	supported := []string{sourceYaguo, sourceMaoguo, sourceFanguo, sourceGuanguo, sourceHeguo, sourceXingguo, sourceHuaguo, sourceNiuguo, sourceWangguo, sourceFaguo, sourcePiguo, sourceWuguo}
+	supported := []string{sourceYaguo, sourceMaoguo, sourceFanguo, sourceGuanguo, sourceHeguo, sourceXingguo, sourceHuaguo, sourceNiuguo, sourceWangguo, sourceFaguo, sourceWuguo}
 	for _, source := range supported {
 		if !duanjuSupportsSearch(source) {
 			t.Fatalf("%s should support online search", source)
@@ -351,7 +351,7 @@ func TestDuanjuSearchSupportMatchesReferenceScripts(t *testing.T) {
 	if duanjuSupportsSearch(sourceHongguo) {
 		t.Fatal("duanju search support leaked onto an existing source")
 	}
-	for _, source := range []string{sourceYaguo, sourceGuanguo, sourceHuaguo, sourceNiuguo, sourceWangguo, sourceFaguo, sourcePiguo, sourceWuguo} {
+	for _, source := range []string{sourceYaguo, sourceGuanguo, sourceHuaguo, sourceNiuguo, sourceWangguo, sourceFaguo, sourceWuguo} {
 		if !duanjuSupportsPaging(source) {
 			t.Fatalf("%s should support paging", source)
 		}

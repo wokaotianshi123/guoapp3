@@ -88,9 +88,6 @@ func (d *Downloader) nativeCoverAddress(ctx context.Context, drama nativeDrama) 
 		}
 		fresh, err := parseHuangguoSortDetail(body, pageURL, Drama{ID: drama.ID, Source: source, SourceID: id})
 		return nativeNormalize(fresh).Cover, err
-	case sourceSorani:
-		fresh, _, err := d.fetchSoraniDetail(ctx, id)
-		return nativeNormalize(fresh).Cover, err
 	case sourceGuipian:
 		fresh, _, err := d.fetchGuipianDetail(ctx, id)
 		return nativeNormalize(fresh).Cover, err

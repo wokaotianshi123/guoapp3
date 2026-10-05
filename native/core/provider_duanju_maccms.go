@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,13 +60,23 @@ func maccmsEpisodeNodes(document *html.Node) []*html.Node {
 	return nodes
 }
 
+// maccmsEpisodeLinkLikely 过滤播放区里的占位链接（javascript:;、#、下载页等）。
+func maccmsEpisodeLinkLikely(link string) bool {
+	lower := strings.ToLower(strings.TrimSpace(link))
+	if lower == "" || strings.HasPrefix(lower, "javascript") || strings.HasPrefix(lower, "#") ||
+		strings.HasPrefix(lower, "mailto") || strings.HasPrefix(lower, "data:") {
+		return false
+	}
+	return strings.HasPrefix(lower, "/") || strings.HasPrefix(lower, "http")
+}
+
 func maccmsEpisodesFromDocument(document *html.Node) []providerEpisode {
 	var episodes []providerEpisode
 	seen := map[string]bool{}
 	for index, anchor := range maccmsEpisodeNodes(document) {
 		link := strings.TrimSpace(providerHTMLAttr(anchor, "href"))
 		title := providerHTMLText(anchor)
-		if link == "" {
+		if !maccmsEpisodeLinkLikely(link) {
 			continue
 		}
 		if strings.Contains(title, "APP") || strings.Contains(title, "下载") {
@@ -84,6 +95,87 @@ func maccmsEpisodesFromDocument(document *html.Node) []providerEpisode {
 		})
 	}
 	return episodes
+}
+
+var (
+	// macplus 形态：/index.php/vod/play/id/123/sid/1/nid/2.html
+	maccmsRouteSIDNID = regexp.MustCompile(`(?i)sid/(\d+)[^0-9]+nid/(\d+)`)
+	// myui 形态：/vodplay/123-1-2.html、/xksiplay/123-1-2.html
+	maccmsRouteMyui = regexp.MustCompile(`(\d+)-(\d+)-(\d+)\.html`)
+)
+
+// maccmsPlayRoute 从播放页链接解析线路号（sid）与集号（nid），无法识别时返回 0。
+func maccmsPlayRoute(link string) (sid int, nid int) {
+	if matches := maccmsRouteSIDNID.FindStringSubmatch(link); len(matches) > 2 {
+		sid, _ = strconv.Atoi(matches[1])
+		nid, _ = strconv.Atoi(matches[2])
+		return sid, nid
+	}
+	if matches := maccmsRouteMyui.FindStringSubmatch(link); len(matches) > 3 {
+		sid, _ = strconv.Atoi(matches[2])
+		nid, _ = strconv.Atoi(matches[3])
+		return sid, nid
+	}
+	return 0, 0
+}
+
+// maccmsCollapseRouteEpisodes 把「线路 × 集数」的平铺列表折叠成单条线路的集数。
+// 详情页播放区常把多条线路的链接全部列出（如 10 条线路 × 103 集 = 上千个链接），
+// 展开会让详情出现大量重复「第 N 集」；线路属于播放页的切换维度，详情只保留一条线路，
+// 其余线路在解析播放地址时作为备选线路返回（见 collectMaccmsRouteVariants）。
+func maccmsCollapseRouteEpisodes(episodes []providerEpisode) []providerEpisode {
+	if len(episodes) < 2 {
+		return episodes
+	}
+	type routeGroup struct {
+		order    int
+		seen     map[int]bool
+		episodes []providerEpisode
+	}
+	groups := map[int]*routeGroup{}
+	var order []int
+	for _, episode := range episodes {
+		sid, nid := maccmsPlayRoute(episode.URL)
+		if sid <= 0 || nid <= 0 {
+			continue
+		}
+		entry, found := groups[sid]
+		if !found {
+			entry = &routeGroup{order: len(order), seen: map[int]bool{}}
+			groups[sid] = entry
+			order = append(order, sid)
+		}
+		if entry.seen[nid] {
+			continue
+		}
+		entry.seen[nid] = true
+		entry.episodes = append(entry.episodes, episode)
+	}
+	if len(groups) < 2 {
+		// 只有一条线路（或无法识别线路结构），保持原有顺序与数量，避免误删分集。
+		return episodes
+	}
+	// 取集数最全的线路；集数相同时取线路号最小的（sid=1 通常是站点默认线路，
+	// 详情页的渲染顺序可能被「线路优选」之类的运营位打乱，不适合作为依据）。
+	bestSID := order[0]
+	best := groups[bestSID]
+	for _, sid := range order {
+		candidate := groups[sid]
+		if len(candidate.episodes) > len(best.episodes) ||
+			(len(candidate.episodes) == len(best.episodes) && sid < bestSID) {
+			best, bestSID = candidate, sid
+		}
+	}
+	sort.SliceStable(best.episodes, func(i, j int) bool {
+		_, left := maccmsPlayRoute(best.episodes[i].URL)
+		_, right := maccmsPlayRoute(best.episodes[j].URL)
+		return left < right
+	})
+	for index := range best.episodes {
+		best.episodes[index].Index = index + 1
+		best.episodes[index].Key = strconv.Itoa(index + 1)
+	}
+	return best.episodes
 }
 
 func maccmsCardCover(card *html.Node, pageURL string) string {
@@ -313,16 +405,6 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 		} else {
 			address = fmt.Sprintf("%s%s%d---.html", base, strings.SplitN(class, "---.html", 2)[0], page)
 		}
-	case source == sourcePiguo:
-		class := strings.TrimSpace(category)
-		if class == "" {
-			class = "67"
-		}
-		if page <= 1 {
-			address = fmt.Sprintf("%s/p/66/c/%s", base, url.PathEscape(class))
-		} else {
-			address = fmt.Sprintf("%s/p/66/c/%s?year=&page=%d", base, url.PathEscape(class), page)
-		}
 	case isCustomMaccmsSource(source):
 		// 自定义 maccms 站点：按首页信号自动识别模板家族（index.php / myui 系），多候选探测。
 		return d.fetchMaccmsCustomCatalog(ctx, source, page, category)
@@ -431,7 +513,7 @@ func (d *Downloader) fetchMaccmsDetail(ctx context.Context, source, sourceID str
 			lastErr = err
 			continue
 		}
-		episodes := maccmsEpisodesFromDocument(document)
+		episodes := maccmsCollapseRouteEpisodes(maccmsEpisodesFromDocument(document))
 		if len(episodes) == 0 {
 			lastErr = errors.New("未解析到分集列表")
 			continue
@@ -488,11 +570,6 @@ func maccmsDetailCandidates(source, base, sourceID string) []string {
 			fmt.Sprintf("%s/vod/%s.html", base, sourceID),
 			fmt.Sprintf("%s/index.php/vod/detail/id/%s.html", base, sourceID),
 			fmt.Sprintf("%s/detail/%s.html", base, sourceID),
-		}
-	case source == sourcePiguo:
-		return []string{
-			fmt.Sprintf("%s/movie/%s", base, sourceID),
-			fmt.Sprintf("%s/p/66/d/%s", base, sourceID),
 		}
 	case source == sourceHuaguo:
 		return []string{
@@ -643,8 +720,6 @@ func (d *Downloader) searchMaccms(ctx context.Context, source, query string) ([]
 		address = fmt.Sprintf("%s/index.php/vod/search/page/1/wd/%s.html", base, url.PathEscape(query))
 	case source == sourceWangguo:
 		address = fmt.Sprintf("%s/search/%s----------1---.html", base, url.PathEscape(query))
-	case source == sourcePiguo:
-		address = fmt.Sprintf("%s/q/%s?page=1", base, url.PathEscape(query))
 	case isCustomMaccmsSource(source):
 		// 自定义站点：按模板家族使用对应搜索路径（index.php / vodsearch / xksisearch 等）。
 		profile := maccmsCustomProfileFor(ctx, d, source, base)
@@ -749,9 +824,22 @@ func maccmsDecryptPlayerURL(raw, encrypt string) string {
 
 var maccmsJSEscapeHex = regexp.MustCompile(`%([0-9a-fA-F]{2})`)
 
+// maccmsJSUnicodeEscape 匹配 JS escape() 产出的 %uXXXX（url.QueryUnescape 不认这种写法）。
+var maccmsJSUnicodeEscape = regexp.MustCompile(`(?i)%u([0-9a-f]{4})`)
+
 func maccmsUnescapeJS(value string) string {
 	if !strings.Contains(value, "%") {
 		return value
+	}
+	// 先把 %uXXXX 还原成字符，再交给 QueryUnescape 处理 %XX，
+	// 否则路径里的中文（如 /video/剧名/第01集/index.m3u8）会残留 %u7B2C 之类的转义导致 404。
+	if strings.Contains(strings.ToLower(value), "%u") {
+		value = maccmsJSUnicodeEscape.ReplaceAllStringFunc(value, func(match string) string {
+			if number, err := strconv.ParseUint(match[2:], 16, 32); err == nil {
+				return string(rune(number))
+			}
+			return match
+		})
 	}
 	if unescaped, err := url.QueryUnescape(value); err == nil {
 		return unescaped
