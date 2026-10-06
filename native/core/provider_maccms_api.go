@@ -3,11 +3,13 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -28,7 +30,19 @@ import (
 // 探测不到或调用失败再退回原有模板解析，已接入的站点行为不变。
 // ---------------------------------------------------------------------------
 
-var maccmsAPIEndpointCache sync.Map // source -> 可用的 API 地址（"" 表示不支持）
+var maccmsAPIEndpointCache sync.Map // source -> maccmsAPIEndpointEntry（正面长期缓存，负面短 TTL）
+
+// maccmsAPIEndpointEntry 缓存一次 API 探测结果：
+// endpoint 非空为正面结论（长期有效）；endpoint 为空且 expires 非零为
+// 确定性负面结论（TTL 内不再探测）；临时性失败不写缓存。
+// 避免站点瞬时 503 限流把自定义源永久锁死在 HTML 兜底路径。
+type maccmsAPIEndpointEntry struct {
+	endpoint string
+	expires  time.Time
+}
+
+// maccmsAPIStatusPattern 从 fetchProviderText 的错误串提取 HTTP 状态码。
+var maccmsAPIStatusPattern = regexp.MustCompile(`HTTP (\d{3})`)
 
 // maccmsAPIEndpointCandidates 罗列常见的 API 挂载位置，逐个探测。
 func maccmsAPIEndpointCandidates(base string) []string {
@@ -45,21 +59,87 @@ func maccmsAPIEndpointCandidates(base string) []string {
 	}
 }
 
-// maccmsAPIEndpointFor 返回该站源可用的 API 地址，空串表示不支持。结果按站源缓存。
+// maccmsAPIEndpointFor 返回该站源可用的 API 地址，空串表示当前判定不支持。
+// 正面结果长期缓存；临时性失败（5xx、网络错误）不缓存，
+// 确定性负面结论（响应不是 JSON API）缓存 60 秒后过期重试。
 func maccmsAPIEndpointFor(ctx context.Context, d *Downloader, source, base string) string {
 	if cached, found := maccmsAPIEndpointCache.Load(source); found {
-		return cached.(string)
+		entry := cached.(maccmsAPIEndpointEntry)
+		if entry.endpoint != "" || time.Now().Before(entry.expires) {
+			return entry.endpoint
+		}
 	}
+	provisional := false
 	found := ""
 	for _, candidate := range maccmsAPIEndpointCandidates(base) {
-		if _, err := d.maccmsAPICall(ctx, candidate+"?ac=videolist&pg=1", base+"/"); err != nil {
-			continue
+		endpoint, permanent := d.maccmsAPIProbeOnce(ctx, candidate, base)
+		if endpoint != "" {
+			found = candidate
+			break
 		}
-		found = candidate
-		break
+		if !permanent {
+			provisional = true
+		}
 	}
-	maccmsAPIEndpointCache.Store(source, found)
+	switch {
+	case found != "":
+		maccmsAPIEndpointCache.Store(source, maccmsAPIEndpointEntry{endpoint: found})
+	case provisional:
+		// 站点可能只是临时限流/抖动：短 TTL 后重试，既不让风暴期反复重探，
+		// 也不会把瞬时 503 变成永久降级。
+		maccmsAPIEndpointCache.Store(source, maccmsAPIEndpointEntry{expires: time.Now().Add(30 * time.Second)})
+	default:
+		maccmsAPIEndpointCache.Store(source, maccmsAPIEndpointEntry{expires: time.Now().Add(60 * time.Second)})
+	}
 	return found
+}
+
+// maccmsAPIProbeOnce 探测单个候选 API 地址。
+// 返回 (endpoint, definitive)：endpoint 非空表示该候选可用；
+// definitive=true 表示拿到了明确的「非 API 响应」，可放心缓存负面结论；
+// definitive=false 表示传输层/5xx 等临时故障，不应据此否定 API 支持。
+func (d *Downloader) maccmsAPIProbeOnce(ctx context.Context, candidate, base string) (string, bool) {
+	body, err := d.fetchProviderText(ctx, candidate+"?ac=videolist&pg=1", base+"/")
+	if err != nil {
+		return "", maccmsAPIErrorDefinitive(err)
+	}
+	body = strings.TrimSpace(body)
+	if !strings.HasPrefix(body, "{") {
+		return "", true // 站点有响应但不是 JSON API：确定不支持
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return candidate, false // JSON 却解析失败：形态可疑，不缓存负面结论
+	}
+	if _, hasList := payload["list"]; hasList {
+		return candidate, false // list 键存在即认 API（空列表只是暂无数据）
+	}
+	if _, hasData := payload["data"]; hasData {
+		return candidate, false
+	}
+	return "", true
+}
+
+// maccmsAPIErrorDefinitive 判断一次抓取错误是否是「站点明确拒绝」而非临时抖动。
+// fetchProviderText 的 HTTP 错误形如 "host HTTP 503"；5xx/408/429 与无状态码的
+// 网络错误都属临时（下次调用应重试探测），其余 4xx 说明该路径确实没有 API。
+func maccmsAPIErrorDefinitive(err error) bool {
+	if err == nil {
+		return false
+	}
+	var backoff *requestBackoff
+	if errors.As(err, &backoff) {
+		return backoff.status >= 400 && backoff.status < 500 && backoff.status != 408 && backoff.status != 429
+	}
+	match := maccmsAPIStatusPattern.FindStringSubmatch(err.Error())
+	if len(match) != 2 {
+		return false // 无状态码：连接失败/超时等，视为临时
+	}
+	status, convErr := strconv.Atoi(match[1])
+	if convErr != nil {
+		return false
+	}
+	return status >= 400 && status < 500 && status != 408 && status != 429
 }
 
 // maccmsAPICall 请求 API 并解出 list / class，失败时返回错误。

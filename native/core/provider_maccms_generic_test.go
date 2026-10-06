@@ -182,3 +182,68 @@ func itemTitles(items []Drama) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// TestMaccmsCategoryNavLinkRejectsNavPaths 固化 iqiyizyapi 类站点的修复：
+// 首页混排的分类导航（/index.php/vod/type/id/N.html、/vodtype/N.html、
+// /vod/show/id、/show 筛选、page 分页）不得被当成剧集卡片；
+// 真详情形态（/vod/detail/id、/voddetail、/show/N.html 详情）必须放行。
+func TestMaccmsCategoryNavLinkRejectsNavPaths(t *testing.T) {
+	category := []string{
+		"https://iqiyizyapi.com/index.php/vod/type/id/7.html",
+		"https://iqiyizyapi.com/index.php/vod/type/page/1.html",
+		"https://iqiyizyapi.com/vodtype/2.html",
+		"https://iqiyizyapi.com/xksitype/3.html",
+		"https://iqiyizyapi.com/index.php/vod/show/id/8/page/1.html",
+		"https://iqiyizyapi.com/index.php/vod/show/page/2.html",
+		"https://iqiyizyapi.com/vodshow/1-----------.html",
+	}
+	for _, link := range category {
+		if !maccmsCategoryNavLink(link) {
+			t.Errorf("分类导航应被识别: %s", link)
+		}
+	}
+	detail := []string{
+		"https://iqiyizyapi.com/index.php/vod/detail/id/86188.html",
+		"https://iqiyizyapi.com/voddetail/123.html",
+		"https://example.com/vodshow/123.html",
+		"https://example.com/vod/123.html",
+		"https://example.com/detail/123.html",
+	}
+	for _, link := range detail {
+		if maccmsCategoryNavLink(link) {
+			t.Errorf("详情链接不应被误判为分类: %s", link)
+		}
+	}
+}
+
+// TestMaccmsCardsSkipsCategoryNavOnIqiyiLikeHome 验证非标准模板首页上
+// 「分类导航被剔除、剧集卡片被保留」（对应 iqiyizyapi 首页形态）。
+func TestMaccmsCardsSkipsCategoryNavOnIqiyiLikeHome(t *testing.T) {
+	body := `<ul class="nav">` +
+		`<li><a href="/index.php/vod/type/id/7.html">电影</a></li>` +
+		`<li><a href="/index.php/vod/type/id/8.html">连续剧</a></li>` +
+		`</ul>` +
+		`<ul><li><a class="this-link flex" href="/index.php/vod/detail/id/86188.html" title="联邦调查局第九季"><h5>联邦调查局第九季</h5></a></li>` +
+		`<li><a class="this-link flex" href="/index.php/vod/detail/id/7887.html" title="遮天"><h5>遮天</h5></a></li></ul>`
+	document, err := html.Parse(strings.NewReader(`<html><body>` + body + `</body></html>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards := maccmsCards(document, "custom:dbg", "https://iqiyizyapi.com")
+	if len(cards) != 2 {
+		t.Fatalf("应只剩 2 个剧集卡片，实际 %d: %+v", len(cards), titlesOf(cards))
+	}
+	for _, c := range cards {
+		if c.SourceID == "7" || c.SourceID == "8" {
+			t.Fatalf("分类导航混入列表: %+v", c)
+		}
+	}
+}
+
+func titlesOf(items []Drama) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.Title)
+	}
+	return out
+}

@@ -138,3 +138,35 @@ func TestAdFilterNativeAdCleanedRespectsSwitch(t *testing.T) {
 		t.Fatalf("空会话应原样返回:\n%s", got)
 	}
 }
+
+// TestAdFilterPreRollKeepsHeader 复现「贴片广告」（第一个分片就是广告）场景：
+// 广告前置的注释里混着整个清单的头部标签（#EXTM3U/#EXT-X-VERSION/#EXT-X-TARGETDURATION），
+// 只应删除广告自己的分片级标签（DISCONTINUITY/EXTINF），头部标签必须保留，
+// 否则删掉必需要素会让清单整体失效、正片也无法播放。
+func TestAdFilterPreRollKeepsHeader(t *testing.T) {
+	var builder []string
+	builder = append(builder, "#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:10")
+	builder = append(builder, "#EXT-X-DISCONTINUITY", "#EXTINF:5.0,", "https://cdn.main.com/ads/preroll.ts")
+	for index := 0; index < 8; index++ {
+		builder = append(builder, "#EXTINF:10.0,", "https://cdn.main.com/vod/"+strconv.Itoa(index)+".ts")
+	}
+	builder = append(builder, "#EXT-X-ENDLIST")
+	original := strings.Join(builder, "\n")
+	cleaned, removed := nativeFilterAdSegments(original, "https://cdn.main.com/vod/index.m3u8")
+	if removed != 1 {
+		t.Fatalf("应移除 1 个贴片分片，实际 %d:\n%s", removed, cleaned)
+	}
+	// 广告分片与其 EXTINF/DISCONTINUITY 被删
+	if strings.Contains(cleaned, "/ads/") || strings.Contains(cleaned, "#EXT-X-DISCONTINUITY") {
+		t.Fatalf("贴片分片及其前置标签应被移除:\n%s", cleaned)
+	}
+	// 头部标签必须保留（否则清单失效）
+	for _, required := range []string{"#EXTM3U", "#EXT-X-VERSION", "#EXT-X-TARGETDURATION", "#EXT-X-ENDLIST"} {
+		if !strings.Contains(cleaned, required) {
+			t.Fatalf("头部标签 %s 不应被删:\n%s", required, cleaned)
+		}
+	}
+	if !strings.Contains(cleaned, "/vod/0.ts") || !strings.Contains(cleaned, "/vod/7.ts") {
+		t.Fatalf("主分片应保留:\n%s", cleaned)
+	}
+}

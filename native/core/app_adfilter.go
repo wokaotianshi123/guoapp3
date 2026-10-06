@@ -22,6 +22,11 @@ import (
 var (
 	masterVariantTag = regexp.MustCompile(`(?i)^#EXT-X-(STREAM-INF|MEDIA:|I-FRAME-STREAM-INF|IMAGE-STREAM-INF)`)
 	m3u8SegmentTag   = regexp.MustCompile(`(?i)^#EXTINF:`)
+	// adTagLine 与参考实现（Player.tsx fetchAndCleanM3u8）一致：删除广告分片时
+	// 只回收这四种分片级标签。播放列表级头部注释（VERSION / TARGETDURATION /
+	// MEDIA-SEQUENCE / PLAYLIST-TYPE / MAP 等）必须保留——广告若是贴片时它们
+	// 就挂在第一个分片前面，误删会让清单失去必需要素而整体无法播放。
+	adTagLine = regexp.MustCompile(`(?i)^#EXT(INF:|-X-(BYTERANGE|KEY|DISCONTINUITY))`)
 )
 
 // nativeAdCleaned 按会话开关决定是否清洗；关闭或清洗无收益时原样返回。
@@ -113,8 +118,21 @@ func nativeFilterAdSegments(text, baseURL string) (string, int) {
 		}
 		removed++
 		remove[seg.uri] = true
-		for _, c := range seg.comment {
-			remove[c] = true
+		// 从最靠近分片的注释行向上回溯（与参考实现一致）：
+		// 命中分片级标签（EXTINF/BYTERANGE/KEY/DISCONTINUITY）→ 删除并继续；
+		// 普通注释（# 开头但非 #EXT）→ 保留但继续；
+		// 其它 #EXT 头部标签（VERSION/TARGETDURATION/MAP…）→ 停止。
+		// 广告若是贴片时头部注释就挂在第一个分片前，误删会让清单整体失效。
+		for index := len(seg.comment) - 1; index >= 0; index-- {
+			line := strings.TrimSpace(lines[seg.comment[index]])
+			if adTagLine.MatchString(line) {
+				remove[seg.comment[index]] = true
+				continue
+			}
+			if strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#EXT") {
+				continue
+			}
+			break
 		}
 	}
 	if removed == 0 || removed >= len(segments) {

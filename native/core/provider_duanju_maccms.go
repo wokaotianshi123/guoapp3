@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -280,6 +281,9 @@ func maccmsCards(document *html.Node, source, base string) []Drama {
 		if link == "" || title == "" {
 			continue
 		}
+		if maccmsCategoryNavLink(link) {
+			continue // 分类导航不是剧集（如 /vodtype/2.html、/index.php/vod/type/id/7.html）
+		}
 		sourceID := maccmsSourceIDFromURL(link)
 		if sourceID == "" || ids[sourceID] {
 			continue
@@ -341,6 +345,37 @@ var maccmsCardClasses = []string{
 }
 
 var maccmsDetailPath = regexp.MustCompile(`(?i)/(?:voddetail|detail|show|vod|drama|movie|tv)/([0-9]+)(?:[-./]|$)`)
+
+// maccmsCategoryNavLink 判定链接是否为分类/筛选/分页导航（而不是剧集详情页）。
+// 非标准模板兜底收集卡片时，首页导航里成批出现的 /vodtype/2.html、
+// /index.php/vod/type/id/7.html、/index.php/vod/show/page/1.html 等链接的
+// 尾部数字会被当成剧集 ID，导致「分类项混进列表」。真详情形态（/vod/detail/id/N、
+// /voddetail/N.html、/show/N.html）不受影响。
+func maccmsCategoryNavLink(link string) bool {
+	parsed, err := url.Parse(link)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	if strings.Contains(path, "---") {
+		return true // vodshow/1-----------.html 这类筛选分页
+	}
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for index, segment := range segments {
+		if segment == "type" || strings.HasSuffix(segment, "type") {
+			return true // vodtype / xksitype / newstype / type 都是分类路径
+		}
+		if segment == "page" {
+			return true // 分页链接不是剧集卡片
+		}
+		if segment == "show" && index+1 < len(segments) {
+			if segments[index+1] == "id" || segments[index+1] == "page" {
+				return true // /vod/show/id/N 与 /vod/show/page/N：筛选页形态
+			}
+		}
+	}
+	return false
+}
 
 func maccmsSourceIDFromURL(link string) string {
 	parsed, err := url.Parse(link)
@@ -916,13 +951,20 @@ type maccmsCustomProfile struct {
 	Categories     []maccmsCategorySignal
 	DetailFmts     []string
 	// home 缓存首页文档，供通用链接抽取兜底复用，避免重复抓首页。
-	home *html.Node
+	home     *html.Node
 	Category func(base, category string, page int) string
 	AllPage  func(base string, page int) string
 	Search   func(base, query string) string
 }
 
-var maccmsCustomProfileCache sync.Map // source id -> maccmsCustomProfile
+var maccmsCustomProfileCache sync.Map // source id -> maccmsCustomProfileEntry
+
+// maccmsCustomProfileEntry 缓存一次模板探测结果；首页抓取失败为临时状态，
+// 带 30 秒 TTL 后自动重探（站点瞬时 503 不应让源长期锁死在失败结论）。
+type maccmsCustomProfileEntry struct {
+	profile maccmsCustomProfile
+	expires time.Time
+}
 
 func (p maccmsCustomProfile) detailCandidates(base, id string) []string {
 	var out []string
@@ -943,6 +985,7 @@ var (
 //   - /vodtype/1.html、/type/1.html、/xksitype/1.html（myui 系，前缀任意）
 //   - /index.php/vod/type/id/1.html、/index.php/vod/type/1.html（indexphp 系）
 //   - /show/1-----------.html、/vodshow/1.html、/list/1.html（macplus 等）
+//
 // 第 1 组固定为分类 ID，第 2 组（若有）为分类路径前缀。
 var maccmsHomeTypePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)^/(?:index\.php/)?vod/type/id/(\d{1,6})\.html$`),
@@ -1046,10 +1089,19 @@ func maccmsCustomHomeSignals(document *html.Node) ([]maccmsCategorySignal, strin
 
 func maccmsCustomProfileFor(ctx context.Context, d *Downloader, source, base string) maccmsCustomProfile {
 	if cached, found := maccmsCustomProfileCache.Load(source); found {
-		return cached.(maccmsCustomProfile)
+		entry := cached.(maccmsCustomProfileEntry)
+		if entry.profile.home != nil || time.Now().Before(entry.expires) {
+			return entry.profile
+		}
 	}
 	profile := fetchMaccmsCustomProfile(ctx, d, base)
-	maccmsCustomProfileCache.Store(source, profile)
+	entry := maccmsCustomProfileEntry{profile: profile}
+	if profile.home == nil {
+		// 首页抓取失败（连接超时/HTTP 错误/瞬时 503）只缓存 30 秒：
+		// 否则一次抖动会让该源长时间按「不可访问」处理，无法自愈。
+		entry.expires = time.Now().Add(30 * time.Second)
+	}
+	maccmsCustomProfileCache.Store(source, entry)
 	return profile
 }
 
