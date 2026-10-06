@@ -128,6 +128,38 @@ const xbpqSelectorPage = `<html><body>
 <div class="other"><a href="/ad/1.html">广告</a></div>
 </body></html>`
 
+// ffv 风格规则：分类 ID 是站点路径片段而非纯数字。
+const xbpqSlugRuleJSON = `{"主页url":"https://ffv.example.com","分类":"电视剧$tv#电影$movie#动漫$cartoon","分类url":"https://ffv.example.com/type/{cateId}/{catePg}/","数组":"<li>&&</li>","列表图片":"data-original=\"&&\"","封面":"data-original=\"&&\"","链接":"href=\"&&\"","标题":"title=\"&&\"","详情url":"https://ffv.example.com/detail/{id}/","播放数组":"mac_url='&&'","播放列表":"#","播放标题":"&&$","播放链接":"$&&"}`
+
+func TestXBPQSlugCategories(t *testing.T) {
+	rule, ok := parseXBPQRule(xbpqSlugRuleJSON)
+	if !ok {
+		t.Fatal("slug 规则解析失败")
+	}
+	categories := xbpqRuleCategories(rule)
+	if len(categories) != 3 || categories[0].ID != "tv" || categories[2].Name != "动漫" {
+		t.Fatalf("分类解析错误: %+v", categories)
+	}
+	if pageURL := xbpqCategoryURL(rule, "https://ffv.example.com", "movie", 2); pageURL != "https://ffv.example.com/type/movie/2/" {
+		t.Fatalf("分类url 未填充路径型分类: %q", pageURL)
+	}
+}
+
+func TestXBPQDetailCoverUsesRuleField(t *testing.T) {
+	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = writer.Write([]byte(`<html><body><div class="cover"><img data-original="/pic/77.jpg"></div><h2>七号剧</h2><script>var mac_url='第1集$http://cdn.example.com/1.m3u8';</script></body></html>`))
+	})
+	rule, _ := parseXBPQRule(xbpqSlugRuleJSON)
+	drama, _, err := d.xbpqDetail(context.Background(), "custom:slugtest", server.URL, "77", rule)
+	if err != nil {
+		t.Fatalf("xbpq 详情失败: %v", err)
+	}
+	if drama.Cover != server.URL+"/pic/77.jpg" {
+		t.Fatalf("封面未按规则字段提取: %q", drama.Cover)
+	}
+}
+
 func TestXBPQSelectorCatalog(t *testing.T) {
 	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")

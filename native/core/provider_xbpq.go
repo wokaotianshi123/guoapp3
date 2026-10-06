@@ -1086,6 +1086,11 @@ func xbpqCleanText(value string) string {
 	return strings.TrimSpace(value)
 }
 
+// xbpqCategoryIDPattern 规则「分类」字段里的分类标识：既收 MacCMS 模板的纯数字
+// ID，也收站点把分类写成路径片段的形态（tv、/fenlei/1…）——validNativeCategory
+// 已为自定义源放行这类 ID，规则解析这里不应再按纯数字过滤。
+var xbpqCategoryIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_/-]{0,79}$`)
+
 // categories：分类串 name$id#name$id（含 `1--子分类$5#...` 变体）
 func xbpqRuleCategories(rule xbpqRule) []nativeCategory {
 	raw := rule.field("分类")
@@ -1120,13 +1125,13 @@ func xbpqRuleCategories(rule xbpqRule) []nativeCategory {
 			}
 			name = xbpqCleanText(name)
 			id = strings.TrimSpace(id)
-			if main, subName, hasMain := strings.Cut(name, "--"); hasMain && webProviderNumericID.MatchString(main) {
+			if main, subName, hasMain := strings.Cut(name, "--"); hasMain && xbpqCategoryIDPattern.MatchString(main) {
 				if subName != "" {
 					subs = append(subs, subEntry{main: main, id: id, name: subName})
 				}
 				continue
 			}
-			if webProviderNumericID.MatchString(id) && name != "" {
+			if xbpqCategoryIDPattern.MatchString(id) && name != "" {
 				add(id, name)
 			}
 		}
@@ -1354,7 +1359,10 @@ func (d *Downloader) xbpqDetail(ctx context.Context, source, base, sourceID stri
 		}
 	}
 	intro := pick(rule.field("简介"), maccmsDetailIntro(document))
-	cover := xbpqJoinLink(pageURL, rule.field("封面", "图片"))
+	cover := ""
+	if pattern := rule.field("封面", "图片"); pattern != "" {
+		cover = xbpqJoinLink(pageURL, xbpqItemField(item, pattern))
+	}
 	if cover == "" {
 		cover = maccmsDetailCover(document, pageURL)
 	}
