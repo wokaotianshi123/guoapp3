@@ -598,8 +598,8 @@ func customSourceRecords() []map[string]any {
 
 // customSourceAction 新增或更新自定义源。核心记录放在 data 字段；失败时
 // 返回核心的真实错误（如"该网址已存在"），供前端原样展示而不是被当成乱码。
-func customSourceAction(action, id, name, base string) (map[string]any, error) {
-	payload := map[string]any{"action": action, "name": name, "base": base}
+func customSourceAction(action, id, name, base, rule string) (map[string]any, error) {
+	payload := map[string]any{"action": action, "name": name, "base": base, "rule": rule}
 	if id != "" {
 		payload["source"] = id
 	}
@@ -649,13 +649,106 @@ func quoteJSON(value string) string {
 	return string(encoded)
 }
 
+// customSourceExport 导出全部自定义源为 JSON 文本（含 XBPQ 规则原文）。
+func customSourceExport() (string, string, error) {
+	var reply struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Content  string `json:"content"`
+			Filename string `json:"filename"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(core.NativeRequest(`{"action":"exportCustomSources"}`)), &reply); err != nil || !reply.OK {
+		message := strings.TrimSpace(reply.Error)
+		if message == "" {
+			message = "导出失败"
+		}
+		return "", "", errors.New(message)
+	}
+	filename := strings.TrimSpace(reply.Data.Filename)
+	if filename == "" {
+		filename = "duanju-custom-sources.json"
+	}
+	return reply.Data.Content, filename, nil
+}
+
+// customSourceImport 导入 JSON 文本，返回核心给出的逐条结果。
+func customSourceImport(content string) (map[string]any, error) {
+	payload, err := json.Marshal(map[string]any{"action": "importCustomSources", "content": content})
+	if err != nil {
+		return nil, err
+	}
+	var reply struct {
+		OK    bool           `json:"ok"`
+		Data  map[string]any `json:"data"`
+		Error string         `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(core.NativeRequest(string(payload))), &reply); err != nil {
+		return nil, errors.New("核心响应无法解析")
+	}
+	if !reply.OK || reply.Data == nil {
+		message := strings.TrimSpace(reply.Error)
+		if message == "" {
+			message = "导入失败"
+		}
+		return nil, errors.New(message)
+	}
+	return reply.Data, nil
+}
+
 // customSourceError 把失败写成前端可解析的 JSON，前端据此显示真实的错误原因。
 func customSourceError(writer http.ResponseWriter, message string) {
 	writeJSON(writer, map[string]any{"ok": false, "error": message})
 }
 
-// 自定义 maccms 源管理：GET 列表 / POST 新增 / PUT {id} 更新 / DELETE {id} 删除。
+// 自定义 maccms 源管理：GET 列表 / POST 新增 / PUT {id} 更新 / DELETE {id} 删除；
+// 以及 GET export 导出文件、POST import 批量导入（JSON / TVBox / 纯文本清单）。
 func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == "/api/custom-sources/export" {
+		if request.Method != http.MethodGet {
+			customSourceError(writer, "导出不支持该请求方法")
+			return
+		}
+		content, filename, err := customSourceExport()
+		if err != nil {
+			customSourceError(writer, err.Error())
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writer.Header().Set("Content-Disposition", "attachment; filename="+filename)
+		_, _ = writer.Write([]byte(content))
+		return
+	}
+	if request.URL.Path == "/api/custom-sources/import" {
+		if request.Method != http.MethodPost {
+			customSourceError(writer, "导入不支持该请求方法")
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(request.Body, 8<<20))
+		if err != nil {
+			customSourceError(writer, "读取导入文件失败")
+			return
+		}
+		// 允许直接上传文件体，也允许 {"content": "..."} 包装
+		content := string(body)
+		var wrapped struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(body, &wrapped) == nil && strings.TrimSpace(wrapped.Content) != "" && strings.TrimSpace(content)[0] == '{' {
+			var probe map[string]any
+			if json.Unmarshal(body, &probe) == nil && probe["content"] != nil {
+				content = wrapped.Content
+			}
+		}
+		result, err := customSourceImport(content)
+		if err != nil {
+			customSourceError(writer, err.Error())
+			return
+		}
+		writeJSON(writer, map[string]any{"ok": true, "result": result})
+		return
+	}
 	switch request.Method {
 	case http.MethodGet:
 		writeJSON(writer, map[string]any{"items": customSourceRecords()})
@@ -669,12 +762,13 @@ func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
 		payload := struct {
 			Name string `json:"name"`
 			Base string `json:"base"`
+			Rule string `json:"rule"`
 		}{}
 		if json.Unmarshal(body, &payload) != nil {
 			customSourceError(writer, "请求不是合法 JSON")
 			return
 		}
-		record, err := customSourceAction("addCustomSource", "", payload.Name, payload.Base)
+		record, err := customSourceAction("addCustomSource", "", payload.Name, payload.Base, payload.Rule)
 		if err != nil {
 			customSourceError(writer, err.Error())
 			return
@@ -697,12 +791,13 @@ func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
 		payload := struct {
 			Name string `json:"name"`
 			Base string `json:"base"`
+			Rule string `json:"rule"`
 		}{}
 		if json.Unmarshal(body, &payload) != nil {
 			customSourceError(writer, "请求不是合法 JSON")
 			return
 		}
-		record, err := customSourceAction("updateCustomSource", id, payload.Name, payload.Base)
+		record, err := customSourceAction("updateCustomSource", id, payload.Name, payload.Base, payload.Rule)
 		if err != nil {
 			customSourceError(writer, err.Error())
 			return

@@ -9,9 +9,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // 自定义 maccms 源：用户可在应用内录入符合 MacCMS 模板的站点地址，
@@ -28,6 +32,7 @@ type customMaccmsSource struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Base      string    `json:"base"`
+	Rule      string    `json:"rule,omitempty"` // XBPQ 爬虫规则 JSON（可选；为空时走模板家族识别）
 	CreatedAt time.Time `json:"createdAt,omitempty"`
 }
 
@@ -101,9 +106,32 @@ func (registry *customMaccmsRegistry) get(id string) (customMaccmsSource, bool) 
 	return record, found
 }
 
-func (registry *customMaccmsRegistry) add(name, base string) (customMaccmsSource, error) {
+func (registry *customMaccmsRegistry) add(name, base, rule string) (customMaccmsSource, error) {
 	name = strings.TrimSpace(name)
 	base = strings.TrimSpace(base)
+	rule = strings.TrimSpace(rule)
+	if len(rule) > customSourceMaxBytes {
+		return customMaccmsSource{}, errors.New("规则内容过大（上限 256KB）")
+	}
+	// 录入的是 XBPQ 爬虫规则 JSON：主页地址与缺省名称都从规则里取。
+	if rule != "" {
+		parsed, ok := parseXBPQRule(rule)
+		if !ok {
+			return customMaccmsSource{}, errors.New("规则 JSON 无法识别：需包含「主页url」等字段")
+		}
+		home := parsed.homeURL()
+		if home == "" {
+			return customMaccmsSource{}, errors.New("规则 JSON 缺少有效的「主页url」")
+		}
+		if parsedBase := strings.TrimSpace(base); parsedBase == "" || !strings.HasPrefix(parsedBase, "http") {
+			base = home
+		}
+		if name == "" {
+			if parsedURL, err := url.Parse(home); err == nil {
+				name = strings.TrimPrefix(parsedURL.Host, "www.")
+			}
+		}
+	}
 	if name == "" || len([]rune(name)) > 40 {
 		return customMaccmsSource{}, errors.New("源名称需要 1 至 40 个字符")
 	}
@@ -130,7 +158,7 @@ func (registry *customMaccmsRegistry) add(name, base string) (customMaccmsSource
 		}
 	}
 	id := customMaccmsID(base)
-	record := customMaccmsSource{ID: id, Name: name, Base: base, CreatedAt: time.Now()}
+	record := customMaccmsSource{ID: id, Name: name, Base: base, Rule: rule, CreatedAt: time.Now()}
 	registry.sources[id] = record
 	if err := registry.save(); err != nil {
 		delete(registry.sources, id)
@@ -149,7 +177,7 @@ func (registry *customMaccmsRegistry) remove(id string) error {
 	return registry.save()
 }
 
-func (registry *customMaccmsRegistry) replace(id, name, base string) error {
+func (registry *customMaccmsRegistry) replace(id, name, base, rule string) error {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	id = strings.TrimSpace(id)
@@ -158,6 +186,19 @@ func (registry *customMaccmsRegistry) replace(id, name, base string) error {
 		return errors.New("自定义源不存在")
 	}
 	name = strings.TrimSpace(name)
+	rule = strings.TrimSpace(rule)
+	if len(rule) > customSourceMaxBytes {
+		return errors.New("规则内容过大（上限 256KB）")
+	}
+	if rule != "" {
+		parsed, ok := parseXBPQRule(rule)
+		if !ok {
+			return errors.New("规则 JSON 无法识别：需包含「主页url」等字段")
+		}
+		if home := parsed.homeURL(); home != "" && !strings.HasPrefix(strings.TrimSpace(base), "http") {
+			base = home
+		}
+	}
 	if name == "" || len([]rune(name)) > 40 {
 		return errors.New("源名称需要 1 至 40 个字符")
 	}
@@ -182,7 +223,7 @@ func (registry *customMaccmsRegistry) replace(id, name, base string) error {
 		}
 	}
 	newID := customMaccmsID(base)
-	record := customMaccmsSource{ID: newID, Name: name, Base: base, CreatedAt: existing.CreatedAt}
+	record := customMaccmsSource{ID: newID, Name: name, Base: base, Rule: rule, CreatedAt: existing.CreatedAt}
 	if newID != id {
 		delete(registry.sources, id)
 	}
@@ -210,23 +251,447 @@ func isCustomMaccmsSource(source string) bool {
 	return strings.HasPrefix(canonicalProviderSource(source), customSourcePrefix)
 }
 
+// ---- 导入导出 ----
+//
+// 导出格式：{"format":"duanju-custom-sources","version":1,"sites":[{name,url,rule}]}
+// 导入兼容：① 本格式；② 纯数组（对象或每行一个网址）；③ TVBox/CatVod 配置
+// （sites/whitelist 数组，含 XBPQ 规则对象或 maccms api 地址）。爬虫 jar 条目
+// 无法在 Go 核心里执行，导入时逐条给出跳过原因而不是整体失败。
+
+const customSourceExportFormat = "duanju-custom-sources"
+
+const customSourceImportLimit = 200
+
+const customSourceImportMaxBytes = 8 << 20
+
+type customSourceDraft struct {
+	Name string
+	Base string
+	Rule string
+}
+
+type customSourceImportResult struct {
+	Added   []customMaccmsSource `json:"added"`
+	Updated []customMaccmsSource `json:"updated"`
+	Skipped []string             `json:"skipped"`
+	Failed  []string             `json:"failed"`
+}
+
+// exportCustomMaccmsSources 序列化全部自定义源，附带 XBPQ 规则原文。
+func (engine *nativeEngine) exportCustomMaccmsSources() (string, error) {
+	records := engine.customMaccmsSources()
+	sort.Slice(records, func(i, j int) bool {
+		left, right := strings.ToLower(records[i].Name), strings.ToLower(records[j].Name)
+		if left != right {
+			return left < right
+		}
+		return records[i].ID < records[j].ID
+	})
+	type exportItem struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+		Rule string `json:"rule,omitempty"`
+	}
+	items := make([]exportItem, 0, len(records))
+	for _, record := range records {
+		items = append(items, exportItem{Name: record.Name, URL: record.Base, Rule: record.Rule})
+	}
+	payload := struct {
+		Format  string       `json:"format"`
+		Version int          `json:"version"`
+		Count   int          `json:"count"`
+		Sites   []exportItem `json:"sites"`
+	}{Format: customSourceExportFormat, Version: 1, Count: len(items), Sites: items}
+	body, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func customSourceExportFilename() string {
+	return "duanju-custom-sources-" + time.Now().Format("2006-01-02") + ".json"
+}
+
+// importCustomMaccmsSources 解析任意受支持文本并逐条落库；单条失败不影响其余。
+func (engine *nativeEngine) importCustomMaccmsSources(content string) (customSourceImportResult, error) {
+	result := customSourceImportResult{Added: []customMaccmsSource{}, Updated: []customMaccmsSource{}, Skipped: []string{}, Failed: []string{}}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return result, errors.New("导入内容为空")
+	}
+	if len(content) > customSourceImportMaxBytes {
+		return result, errors.New("导入文件过大（上限 8MB）")
+	}
+	drafts, notes := customSourceDrafts(content)
+	result.Skipped = append(result.Skipped, notes...)
+	if len(drafts) == 0 {
+		return result, errors.New("未能从文件中识别出任何站点")
+	}
+	if len(drafts) > customSourceImportLimit {
+		result.Skipped = append(result.Skipped, fmt.Sprintf("超出单次导入上限 %d 个，其余已忽略", customSourceImportLimit))
+		drafts = drafts[:customSourceImportLimit]
+	}
+	// 文件内部按网址先去重，避免同一次导入里互相撞「已存在」。
+	seen := map[string]bool{}
+	for _, draft := range drafts {
+		key := strings.ToLower(strings.TrimRight(draft.Base, "/"))
+		if draft.Rule != "" {
+			// 规则源以「规则 + 名称」区分同域多站，键里带上名称。
+			key = key + "|" + draft.Name + "|" + fmt.Sprint(len(draft.Rule))
+		}
+		if key == "|" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		name := customSourceImportName(draft.Name, draft.Base)
+		base := customSourceImportBase(draft.Base, draft.Rule)
+		if base == "" {
+			result.Failed = append(result.Failed, name+"：无法确定站点网址")
+			continue
+		}
+		if existing, found := engine.customRegistry.get(customMaccmsID(base)); found && existing.Rule == draft.Rule {
+			record, err := engine.updateCustomMaccmsSource(existing.ID, name, base, draft.Rule)
+			if err != nil {
+				result.Failed = append(result.Failed, name+"："+err.Error())
+				continue
+			}
+			result.Updated = append(result.Updated, record)
+			continue
+		}
+		record, err := engine.addCustomMaccmsSource(name, base, draft.Rule)
+		if err != nil {
+			message := err.Error()
+			if strings.Contains(message, "已存在") {
+				result.Skipped = append(result.Skipped, name+"：该网址已在自定义源中")
+			} else {
+				result.Failed = append(result.Failed, name+"："+message)
+			}
+			continue
+		}
+		result.Added = append(result.Added, record)
+	}
+	return result, nil
+}
+
+// customSourceImportName 规整名称：去掉表情符前后缀噪音，截到 40 字符，缺省用域名。
+func customSourceImportName(name, base string) string {
+	name = strings.TrimSpace(customXBPQCleanName(name))
+	runes := []rune(name)
+	if len(runes) > 40 {
+		name = string(runes[:40])
+	}
+	if name != "" {
+		return name
+	}
+	if parsed, err := url.Parse(base); err == nil && parsed.Host != "" {
+		return strings.TrimPrefix(parsed.Host, "www.")
+	}
+	return "自定义源"
+}
+
+// customSourceImportBase 补齐协议并把 maccms api 地址收敛成站点根地址。
+func customSourceImportBase(base, rule string) string {
+	base = strings.TrimSpace(base)
+	if rule != "" {
+		if parsed, ok := parseXBPQRule(rule); ok {
+			if home := parsed.homeURL(); home != "" {
+				return home
+			}
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	if !strings.Contains(base, "://") {
+		if strings.HasPrefix(base, "//") {
+			base = "https:" + base
+		} else if strings.Contains(base, "/api.php") || strings.Contains(base, "/provide/vod") {
+			base = "https://" + base
+		} else {
+			base = "https://" + base
+		}
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+var customSourceEmojiPattern = regexp.MustCompile(`[^\p{L}\p{N}\p{Han}\-_·. ]`)
+
+func customXBPQCleanName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.ReplaceAll(name, "\t", " ")
+	name = customSourceEmojiPattern.ReplaceAllString(name, "")
+	name = strings.Join(strings.Fields(name), " ")
+	// 去掉「[X]」「(1.2.3)」这类配置里常见的版本尾缀
+	for {
+		trimmed := strings.TrimSpace(name)
+		if index := strings.LastIndexAny(trimmed, "(["); index > 0 && strings.IndexAny(trimmed, ")]") == len(trimmed)-1 {
+			trimmed = strings.TrimSpace(trimmed[:index])
+		}
+		if trimmed == name {
+			break
+		}
+		name = trimmed
+	}
+	return name
+}
+
+// customSourceDrafts 把任意文本解析成待导入条目；notes 为逐条跳过原因。
+func customSourceDrafts(content string) ([]customSourceDraft, []string) {
+	var notes []string
+	first := content[0]
+	if first != '{' && first != '[' {
+		return customSourceLineDrafts(content), notes
+	}
+	var payload any
+	if json.Unmarshal([]byte(content), &payload) != nil {
+		// JSON 语法问题（尾逗号、注释）：修复后再试一次
+		if repaired := xbpqTrimTrailingComma(stripJSONComments(content)); json.Unmarshal([]byte(repaired), &payload) != nil {
+			return nil, []string{"文件不是合法 JSON"}
+		}
+	}
+	switch typed := payload.(type) {
+	case []any:
+		drafts := customSourceMapDrafts(typed, &notes)
+		return drafts, notes
+	case map[string]any:
+		// 单条规则 / 单条站点
+		draft, note := customSourceDraftFromEntry(typed)
+		if note != "" {
+			notes = append(notes, note)
+		}
+		if draft != nil {
+			return []customSourceDraft{*draft}, notes
+		}
+		// 容器形态：sites / source / data / list
+		for _, key := range []string{"sites", "source", "sources", "list", "data", "whitelist", "items"} {
+			if rows, found := typed[key].([]any); found && len(rows) > 0 {
+				drafts := customSourceMapDrafts(rows, &notes)
+				return drafts, notes
+			}
+		}
+		if rule := customSourceRuleFromMap(typed); rule != "" {
+			return []customSourceDraft{{Rule: rule, Base: customSourceMapBase(typed)}}, notes
+		}
+	}
+	return nil, []string{"文件结构无法识别"}
+}
+
+// customSourceLineDrafts 处理纯文本清单：每行一个站点，支持「名称,网址」或裸网址。
+func customSourceLineDrafts(content string) []customSourceDraft {
+	var drafts []customSourceDraft
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.Trim(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "://") {
+			continue
+		}
+		if strings.HasPrefix(line, "m3u") || strings.HasPrefix(strings.ToLower(line), "http://") && strings.Contains(line, ".m3u") {
+			continue
+		}
+		name := ""
+		if head, tail, found := strings.Cut(line, ","); found && looksLikeSiteAddress(tail) {
+			name, line = strings.TrimSpace(head), strings.TrimSpace(tail)
+		} else if head, tail, found := strings.Cut(line, " "); found && looksLikeSiteAddress(tail) {
+			name, line = strings.TrimSpace(head), strings.TrimSpace(tail)
+		}
+		if !looksLikeSiteAddress(line) {
+			continue
+		}
+		drafts = append(drafts, customSourceDraft{Name: name, Base: line})
+	}
+	return drafts
+}
+
+func looksLikeSiteAddress(candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" || strings.ContainsAny(candidate, " \t\"'") {
+		return false
+	}
+	if strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") || strings.HasPrefix(candidate, "//") {
+		return true
+	}
+	host := candidate
+	if index := strings.IndexAny(host, "/?"); index >= 0 {
+		host = host[:index]
+	}
+	host = strings.TrimPrefix(strings.ToLower(host), "www.")
+	return strings.Contains(host, ".") && !strings.Contains(host, "//") && strings.IndexFunc(host, unicode.IsSpace) < 0
+}
+
+func customSourceMapDrafts(rows []any, notes *[]string) []customSourceDraft {
+	var drafts []customSourceDraft
+	for _, row := range rows {
+		entry, ok := row.(map[string]any)
+		if !ok {
+			if text, isString := row.(string); isString && looksLikeSiteAddress(text) {
+				drafts = append(drafts, customSourceDraft{Base: text})
+			}
+			continue
+		}
+		draft, note := customSourceDraftFromEntry(entry)
+		if note != "" && notes != nil {
+			*notes = append(*notes, note)
+		}
+		if draft != nil {
+			drafts = append(drafts, *draft)
+		}
+	}
+	return drafts
+}
+
+// customSourceDraftFromEntry 解析单条配置：优先规则，其次站点地址；爬虫条目给跳过原因。
+func customSourceDraftFromEntry(entry map[string]any) (*customSourceDraft, string) {
+	name := firstStringField(entry, "name", "名称", "站点名称", "title", "key", "cn")
+	base := firstStringField(entry, "url", "base", "地址", "站点地址", "link", "api", "home", "主页url")
+	// 显式规则字段
+	if rule := firstStringField(entry, "rule", "ruleJson", "规则"); rule != "" {
+		if parsed, ok := parseXBPQRule(rule); ok {
+			candidate := customSourceMapBase(entry)
+			if home := parsed.homeURL(); home != "" {
+				candidate = home
+			}
+			return &customSourceDraft{Name: name, Base: candidate, Rule: rule}, ""
+		}
+	}
+	if rule := customSourceRuleFromMap(entry); rule != "" {
+		candidate := customSourceMapBase(entry)
+		if parsed, ok := parseXBPQRule(rule); ok {
+			if home := parsed.homeURL(); home != "" {
+				candidate = home
+			}
+		}
+		return &customSourceDraft{Name: name, Base: candidate, Rule: rule}, ""
+	}
+	// 爬虫 jar：Go 核心无法执行，明确跳过
+	if spider := firstStringField(entry, "spider", "jar"); spider != "" || entryNumberField(entry, "type") == 3 {
+		label := name
+		if label == "" {
+			label = "未命名条目"
+		}
+		return nil, label + "：爬虫(jar)规则无法在核心内执行，已跳过"
+	}
+	if base == "" {
+		return nil, ""
+	}
+	return &customSourceDraft{Name: name, Base: base}, ""
+}
+
+// customSourceMapBase 从条目里取站点根地址（含 maccms api 地址收敛）。
+func customSourceMapBase(entry map[string]any) string {
+	for _, key := range []string{"url", "base", "地址", "站点地址", "link", "api", "home", "主页url"} {
+		if value := xbpqStringValue(entry[key]); strings.TrimSpace(value) != "" {
+			if !strings.Contains(value, ";") || strings.Contains(value, "http") {
+				return customSourceImportBase(value, "")
+			}
+		}
+	}
+	return ""
+}
+
+var customSourceRuleKeys = []string{"主页url", "首页url", "分类url", "分类Header", "数组", "播放数组", "搜索url", "线路数组", "请求"}
+
+// customSourceRuleFromMap 判断对象本身（或它的 ext）是否为 XBPQ 规则。
+func customSourceRuleFromMap(entry map[string]any) string {
+	if customSourceHasRuleKeys(entry) {
+		if body, err := json.Marshal(entry); err == nil {
+			if _, ok := parseXBPQRule(string(body)); ok {
+				return string(body)
+			}
+		}
+	}
+	switch ext := entry["ext"].(type) {
+	case map[string]any:
+		if customSourceHasRuleKeys(ext) {
+			if body, err := json.Marshal(ext); err == nil {
+				if _, ok := parseXBPQRule(string(body)); ok {
+					return string(body)
+				}
+			}
+		}
+	case []any:
+		for _, item := range ext {
+			node, ok := item.(map[string]any)
+			if !ok || !customSourceHasRuleKeys(node) {
+				continue
+			}
+			if body, err := json.Marshal(node); err == nil {
+				if _, ok := parseXBPQRule(string(body)); ok {
+					return string(body)
+				}
+			}
+		}
+	case string:
+		if parsed, ok := parseXBPQRule(ext); ok {
+			_ = parsed
+			return ext
+		}
+	}
+	return ""
+}
+
+func customSourceHasRuleKeys(entry map[string]any) bool {
+	hit := 0
+	for _, key := range customSourceRuleKeys {
+		if _, found := entry[xbpqNormalizeKey(key)]; found {
+			hit++
+		}
+		if _, found := entry[key]; found {
+			hit++
+		}
+	}
+	return hit >= 2
+}
+
+func firstStringField(entry map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := xbpqStringValue(entry[key]); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func entryNumberField(entry map[string]any, key string) int {
+	value := entry[key]
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case string:
+		if number, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return number
+		}
+	}
+	return -1
+}
+
+// stripJSONComments 去掉 // 行注释，便于导入手写配置。
+var customSourceCommentPattern = regexp.MustCompile(`(?m)^\s*//[^\n]*$`)
+
+func stripJSONComments(text string) string {
+	return customSourceCommentPattern.ReplaceAllString(text, "")
+}
+
 func (engine *nativeEngine) customMaccmsSources() []customMaccmsSource {
 	return engine.customRegistry.all()
 }
 
-func (engine *nativeEngine) addCustomMaccmsSource(name, base string) (customMaccmsSource, error) {
-	return engine.customRegistry.add(name, base)
+func (engine *nativeEngine) addCustomMaccmsSource(name, base, rule string) (customMaccmsSource, error) {
+	return engine.customRegistry.add(name, base, rule)
 }
 
 func (engine *nativeEngine) removeCustomMaccmsSource(id string) error {
 	return engine.customRegistry.remove(id)
 }
 
-func (engine *nativeEngine) updateCustomMaccmsSource(id, name, base string) (customMaccmsSource, error) {
-	if err := engine.customRegistry.replace(id, name, base); err != nil {
+func (engine *nativeEngine) updateCustomMaccmsSource(id, name, base, rule string) (customMaccmsSource, error) {
+	if err := engine.customRegistry.replace(id, name, base, rule); err != nil {
 		return customMaccmsSource{}, err
 	}
-	record, found := engine.customRegistry.get(customMaccmsID(base))
+	record, found := engine.customRegistry.get(customMaccmsID(strings.TrimRight(strings.TrimSpace(base), "/")))
 	if !found {
 		record, found = engine.customRegistry.get(id)
 		if !found {

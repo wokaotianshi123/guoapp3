@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import 'core_bridge.dart';
@@ -8,10 +11,11 @@ import 'models.dart';
 import 'remote_widgets.dart';
 import 'widgets.dart';
 
-/// 自定义 MacCMS 站源管理界面。
+/// 自定义站源管理界面。
 ///
-/// 用户可新增、编辑、删除符合 MacCMS 模板的站点地址。保存后由原生核心
-/// 识别并套用通用 maccms 解析规则，完成列表展示、搜索与播放。
+/// 用户可新增、编辑、删除符合 MacCMS 模板的站点地址，或直接粘贴 XBPQ
+/// 爬虫规则 JSON。保存后由原生核心识别并套用对应解析规则，完成列表展示、
+/// 搜索与播放。支持把全部源导出为 JSON 文件、从 JSON/TXT 文件批量导入。
 class CustomSourcesScreen extends StatefulWidget {
   const CustomSourcesScreen({
     super.key,
@@ -27,6 +31,7 @@ class CustomSourcesScreen extends StatefulWidget {
 
 class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
   bool _loading = true;
+  bool _busy = false;
   String? _error;
 
   @override
@@ -65,6 +70,112 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
       ),
     );
     if (result == true && mounted) unawaited(_load());
+  }
+
+  Future<void> _export() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final content = await widget.repository.exportCustomSources();
+      if (content.isEmpty) throw const FormatException('没有可导出的自定义源');
+      final saved = await FilePicker.saveFile(
+        fileName: 'duanju-custom-sources-'
+            '${DateTime.now().toIso8601String().substring(0, 10)}.json',
+        bytes: Uint8List.fromList(utf8.encode(content)),
+        mimeType: 'application/json',
+      );
+      if (saved != null && mounted) {
+        _showMessage('已导出到 $saved');
+      }
+    } catch (error) {
+      if (mounted) _showMessage(error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _import() async {
+    if (_busy) return;
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['json', 'txt'],
+    );
+    if (file == null || !mounted) return;
+    final size = await file.length();
+    if (size == null || size > 8 * 1024 * 1024) {
+      _showMessage('导入文件过大或无法读取');
+      return;
+    }
+    final content = utf8.decode(await file.readAsBytes());
+    setState(() => _busy = true);
+    try {
+      final result = await widget.repository.importCustomSources(content);
+      await widget.store.syncCustomSources(
+        await widget.repository.customSources(),
+      );
+      if (!mounted) return;
+      _showImportResult(result);
+    } catch (error) {
+      if (mounted) _showMessage(error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _showImportResult(Map<String, dynamic> result) {
+    final added = (result['added'] as List? ?? const []).length;
+    final updated = (result['updated'] as List? ?? const []).length;
+    final skipped = (result['skipped'] as List? ?? const [])
+        .map((item) => item.toString())
+        .toList();
+    final failed = (result['failed'] as List? ?? const [])
+        .map((item) => item.toString())
+        .toList();
+    final details = <String>[
+      ...skipped.map((item) => '跳过：$item'),
+      ...failed.map((item) => '失败：$item'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('导入完成'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('新增 $added 个，更新 $updated 个。'),
+                if (details.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  for (final line in details)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        line,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _remove(CustomSourceSite source) async {
@@ -110,13 +221,25 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
           IconButton(
             key: const ValueKey('custom-source-refresh'),
             tooltip: '刷新',
-            onPressed: _loading ? null : () => unawaited(_load()),
+            onPressed: _loading || _busy ? null : () => unawaited(_load()),
             icon: const Icon(Icons.refresh_rounded),
+          ),
+          IconButton(
+            key: const ValueKey('custom-source-export'),
+            tooltip: '导出 JSON',
+            onPressed: _busy ? null : () => unawaited(_export()),
+            icon: const Icon(Icons.upload_file_rounded),
+          ),
+          IconButton(
+            key: const ValueKey('custom-source-import'),
+            tooltip: '导入文件',
+            onPressed: _busy ? null : () => unawaited(_import()),
+            icon: const Icon(Icons.download_rounded),
           ),
           const SizedBox(width: 4),
           FilledButton.icon(
             key: const ValueKey('custom-source-add'),
-            onPressed: () => unawaited(_openEditor()),
+            onPressed: _busy ? null : () => unawaited(_openEditor()),
             icon: const Icon(Icons.add_rounded, size: 20),
             label: const Text('新增'),
           ),
@@ -142,7 +265,7 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
               if (sources.isEmpty) {
                 return const StatusPanel(
                   title: '还没有自定义源',
-                  message: '点击右上角「新增」，填入符合 MacCMS 模板的站点名称与网址，即可自动适配列表与播放。',
+                  message: '点击「新增」填入 MacCMS 站点地址或粘贴 XBPQ 爬虫规则；也可以「导入文件」批量添加，「导出 JSON」备份迁移。',
                 );
               }
               return ListView(
@@ -151,7 +274,7 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
                   const Padding(
                     padding: EdgeInsets.only(bottom: 16),
                     child: Text(
-                      '自定义源读取网站地址并判断是否符合 MacCMS 规范；符合后套用通用规则自动完成列表展示、搜索与播放。',
+                      '自定义源读取网站地址并判断是否符合 MacCMS 规范；符合后套用通用规则自动完成列表展示、搜索与播放。录入 XBPQ 爬虫规则的站点按规则字段逐项截取。',
                     ),
                   ),
                   for (final source in sources) _sourceCard(source),
@@ -170,8 +293,12 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
       key: ValueKey('custom-${source.id}'),
       margin: const EdgeInsets.only(bottom: 12),
       child: ListTile(
-        leading: const Icon(Icons.dns_outlined),
-        title: Text(source.name),
+        leading: Icon(
+          source.hasRule ? Icons.code_rounded : Icons.dns_outlined,
+        ),
+        title: Text(
+          source.name + (source.hasRule ? '（规则）' : ''),
+        ),
         subtitle: Text(
           source.base,
           maxLines: 1,
@@ -215,6 +342,8 @@ class _CustomSourceEditor extends StatefulWidget {
 class _CustomSourceEditorState extends State<_CustomSourceEditor> {
   late final TextEditingController _name;
   late final TextEditingController _base;
+  late final TextEditingController _rule;
+  bool _ruleMode = false;
   bool _busy = false;
   String? _errorFixed;
 
@@ -223,17 +352,34 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
     super.initState();
     _name = TextEditingController(text: widget.existing?.name ?? '');
     _base = TextEditingController(text: widget.existing?.base ?? '');
+    _rule = TextEditingController(text: widget.existing?.rule ?? '');
+    _ruleMode = widget.existing?.hasRule ?? false;
   }
 
   @override
   void dispose() {
     _name.dispose();
     _base.dispose();
+    _rule.dispose();
     super.dispose();
+  }
+
+  void _toggleRuleMode() {
+    setState(() => _ruleMode = !_ruleMode);
+    _errorFixed = null;
   }
 
   Future<void> _save() async {
     if (_busy) return;
+    final rule = _ruleMode ? _rule.text.trim() : '';
+    if (_ruleMode && rule.isEmpty) {
+      setState(() => _errorFixed = '粘贴规则 JSON 后再保存，或关闭规则开关');
+      return;
+    }
+    if (!_ruleMode && _base.text.trim().isEmpty) {
+      setState(() => _errorFixed = '请填写源网址');
+      return;
+    }
     setState(() {
       _busy = true;
       _errorFixed = null;
@@ -244,12 +390,14 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
         await widget.repository.addCustomSource(
           name: _name.text.trim(),
           base: _base.text.trim(),
+          rule: rule,
         );
       } else {
         await widget.repository.updateCustomSource(
           existing.id,
           name: _name.text.trim(),
           base: _base.text.trim(),
+          rule: rule,
         );
       }
       await widget.store.syncCustomSources(
@@ -271,47 +419,82 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
     return AlertDialog(
       title: Text(widget.existing == null ? '新增自定义源' : '编辑自定义源'),
       content: SizedBox(
-        width: 440,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              key: const ValueKey('custom-source-name'),
-              controller: _name,
-              enabled: !_busy,
-              maxLength: 40,
-              textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
-                labelText: '源名称',
-                hintText: '例如：我的影院',
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              key: const ValueKey('custom-source-base'),
-              controller: _base,
-              enabled: !_busy,
-              keyboardType: TextInputType.url,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '源网址',
-                hintText: 'https://example.com',
-                helperText: '支持符合 MacCMS 规范的站点，自动适配目录、搜索与播放。',
-                helperMaxLines: 3,
-              ),
-            ),
-            if (_errorFixed != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Text(
-                  _errorFixed!,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                key: const ValueKey('custom-source-name'),
+                controller: _name,
+                enabled: !_busy,
+                maxLength: 40,
+                textInputAction: TextInputAction.next,
+                decoration: InputDecoration(
+                  labelText: '源名称',
+                  hintText: _ruleMode ? '留空则用规则里的域名' : '例如：我的影院',
                 ),
               ),
-          ],
+              const SizedBox(height: 12),
+              TextField(
+                key: const ValueKey('custom-source-base'),
+                controller: _base,
+                enabled: !_busy && !_ruleMode,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                decoration: InputDecoration(
+                  labelText: '源网址',
+                  hintText: 'https://example.com',
+                  helperText: _ruleMode
+                      ? '规则模式下自动取规则「主页url」'
+                      : '支持符合 MacCMS 规范的站点，自动适配目录、搜索与播放。',
+                  helperMaxLines: 3,
+                ),
+              ),
+              SwitchListTile(
+                key: const ValueKey('custom-source-rule-toggle'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('XBPQ 爬虫规则'),
+                subtitle: const Text('粘贴 JSON 规则，按规则字段截取内容'),
+                value: _ruleMode,
+                onChanged: _busy ? null : (_) => _toggleRuleMode(),
+              ),
+              if (_ruleMode)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: TextField(
+                    key: const ValueKey('custom-source-rule'),
+                    controller: _rule,
+                    enabled: !_busy,
+                    maxLines: 8,
+                    minLines: 4,
+                    keyboardType: TextInputType.multiline,
+                    autocorrect: false,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                        ),
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      hintText:
+                          '{"主页url":"https://…","分类url":"…{cateId}-{catePg}…","数组":"…&&…","标题":"…","链接":"…"}',
+                      helperText: '兼容截取语法（A&&B）与 p: 选择器；保存时校验规则有效性。',
+                      helperMaxLines: 2,
+                    ),
+                  ),
+                ),
+              if (_errorFixed != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    _errorFixed!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
       actions: [

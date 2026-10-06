@@ -140,6 +140,10 @@ func (d *Downloader) resolveDuanjuMedia(ctx context.Context, task Task) (provide
 	if base == "" {
 		return providerMedia{}, errors.New("站源地址不可用")
 	}
+	// XBPQ 规则源：播放页按规则「跳转播放链接」→ player_data → 嗅探兜底。
+	if rule, ok := customXBPQRule(source); ok {
+		return d.xbpqResolveMedia(ctx, task, rule, base, name)
+	}
 	address := strings.TrimSpace(task.Chapter.VideoURL)
 	pageURL := strings.TrimSpace(task.Chapter.PageURL)
 	referer := firstNonEmpty(task.Chapter.Referer, base+"/")

@@ -424,6 +424,10 @@ func (d *Downloader) fetchMaccmsCatalogPage(ctx context.Context, source string, 
 // 先取首页（page<=1 且无分类），page>1 或带分类时按模板家族探测出的 URL 形态逐候选尝试。
 func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string, page int, category string) ([]Drama, bool, error) {
 	base := d.duanjuBaseURL(source)
+	// XBPQ 规则源：一切按规则字段截取，不走模板识别。
+	if rule, ok := customXBPQRule(source); ok {
+		return d.xbpqCatalog(ctx, source, base, page, category, rule)
+	}
 	// 标准 JSON API 优先：命中就不必再猜页面模板。
 	if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
 		if items, hasMore, err := d.fetchMaccmsAPICatalog(ctx, source, endpoint, base, page, category); err == nil {
@@ -522,6 +526,10 @@ func (d *Downloader) fetchMaccmsCustomCatalog(ctx context.Context, source string
 
 func (d *Downloader) fetchMaccmsDetail(ctx context.Context, source, sourceID string) (Drama, []Chapter, error) {
 	base := d.duanjuBaseURL(source)
+	// XBPQ 规则源：详情与分集按规则截取。
+	if rule, ok := customXBPQRule(source); ok {
+		return d.xbpqDetail(ctx, source, base, sourceID, rule)
+	}
 	candidates := maccmsDetailCandidates(source, base, sourceID)
 	if isCustomMaccmsSource(source) {
 		// 标准 JSON API 优先：详情与播放地址一次拿全，省掉播放页解析。
@@ -751,6 +759,10 @@ func (d *Downloader) searchMaccms(ctx context.Context, source, query string) ([]
 	case source == sourceWangguo:
 		address = fmt.Sprintf("%s/search/%s----------1---.html", base, url.PathEscape(query))
 	case isCustomMaccmsSource(source):
+		// XBPQ 规则源：搜索走规则「搜索url」。
+		if rule, ok := customXBPQRule(source); ok {
+			return d.xbpqSearch(ctx, source, base, query, rule)
+		}
 		// 标准 JSON API 优先：搜索关键字直接交给接口。
 		if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {
 			if items, apiErr := d.fetchMaccmsAPISearch(ctx, source, endpoint, base, query); apiErr == nil && len(items) > 0 {
@@ -1046,6 +1058,10 @@ func (d *Downloader) fetchMaccmsCustomCategories(ctx context.Context, source str
 	base := d.duanjuBaseURL(source)
 	if base == "" {
 		return nil, errors.New("站源地址不可用")
+	}
+	// XBPQ 规则源：分类直接来自规则「分类」字段。
+	if rule, ok := customXBPQRule(source); ok {
+		return d.xbpqCategories(rule), nil
 	}
 	// 先试标准 JSON API：分类是接口自带字段，比首页导航识别稳得多。
 	if endpoint := maccmsAPIEndpointFor(ctx, d, source, base); endpoint != "" {

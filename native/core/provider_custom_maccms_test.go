@@ -37,7 +37,7 @@ func TestCustomMaccmsRegistryWritesWithoutDeadlock(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		record, err := registry.add("测试源", "https://example.com")
+		record, err := registry.add("测试源", "https://example.com", "")
 		done <- result{record, err}
 	}()
 	select {

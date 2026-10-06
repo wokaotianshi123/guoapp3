@@ -111,6 +111,8 @@ type nativeInput struct {
 	Source           string                  `json:"source"`
 	Name             string                  `json:"name"`
 	Base             string                  `json:"base"`
+	Rule             string                  `json:"rule"`
+	Content          string                  `json:"content"`
 	Page             int                     `json:"page"`
 	Query            string                  `json:"query"`
 	Category         string                  `json:"category"`
@@ -471,19 +473,34 @@ func nativeDispatch(input nativeInput) (any, error) {
 	case "customSources":
 		return map[string]any{"items": engine.customMaccmsSources()}, nil
 	case "addCustomSource":
-		record, err := engine.addCustomMaccmsSource(input.Name, input.Base)
+		record, err := engine.addCustomMaccmsSource(input.Name, input.Base, input.Rule)
 		if err != nil {
 			return nil, err
 		}
 		return record, nil
 	case "updateCustomSource":
-		record, err := engine.updateCustomMaccmsSource(input.Source, input.Name, input.Base)
+		record, err := engine.updateCustomMaccmsSource(input.Source, input.Name, input.Base, input.Rule)
 		if err != nil {
 			return nil, err
 		}
 		return record, nil
 	case "removeCustomSource":
 		return true, engine.removeCustomMaccmsSource(input.Source)
+	case "exportCustomSources":
+		content, err := engine.exportCustomMaccmsSources()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"content": content, "filename": customSourceExportFilename()}, nil
+	case "importCustomSources":
+		if strings.TrimSpace(input.Content) == "" {
+			return nil, errors.New("导入内容为空")
+		}
+		result, err := engine.importCustomMaccmsSources(input.Content)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
 	case "cover":
 		return engine.loadCover(ctx, input.Drama, input.Force)
 	case "prepareCover":

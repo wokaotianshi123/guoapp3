@@ -1,0 +1,91 @@
+本次需提交的变更清单（对比基线：20261005 从 GitHub 下载的原始快照）
+====================================================================
+
+一、覆盖已有文件（23 个）
+  根目录
+    README.md                                  删皮果表格行 + 青空说明改为 A123
+  lib/（前端）
+    lib/models.dart                            ★ 删除 piguo / sorani；CustomSourceSite 新增 rule 字段
+    lib/local_snapshot.dart                    ★ 白名单补 customSources（自定义源能保存）
+    lib/local_store.dart                       ★ 自定义源先于用户档案加载
+    lib/local_profiles.dart                    ★ 旧存档里的已下线站源自动过滤
+    lib/profiles_screen.dart                   ★ 编辑旧用户不再写回已下线站源
+    lib/core_bridge.dart                       ★ 自定义源接口透传 rule + export/import 两个方法
+    lib/custom_sources_screen.dart             ★ 编辑器加 XBPQ 规则开关与粘贴框；顶栏加导入/导出
+  native/core/（Go 核心）
+    native/core/app_categories.go
+    native/core/app_cover_metadata.go
+    native/core/app_runtime.go                 ★ add/update 增 rule；新增 export/importCustomSources
+    native/core/app_sources.go
+    native/core/provider_custom_maccms.go      ★ XBPQ 规则录入 + 导入导出全套逻辑
+    native/core/provider_duanju.go
+    native/core/provider_duanju_dispatch.go    ★ 接入 XBPQ 规则源取流
+    native/core/provider_duanju_maccms.go      ★ 分类导航形态扩展 + API 优先 + XBPQ 规则源分发
+    native/core/provider_duanju_test.go
+    native/core/provider_huangguo.go
+    native/core/provider_media.go
+  native/server/
+    native/server/main.go                      ★ 自定义源 rule 透传 + /export /import 端点
+    native/server/web/app.js                   ★ 规则编辑框 + 导入/导出按钮
+  test/
+    test/sources_test.dart
+
+二、新增文件（11 个）
+    native/core/provider_a123.go               A123 站源
+    native/core/provider_custom_maccms_test.go
+    native/core/provider_duanju_route_test.go
+    native/core/provider_maccms_api.go         ★ MacCMS 标准 JSON API（/api.php/provide/vod/）链路
+    native/core/provider_maccms_api_test.go    ★ 上面那个文件的离线单测
+    native/core/provider_maccms_generic.go     ★ 通用链接抽取兜底（首页无 API/导航时直接扫 <a> 抽详情链接 + 统计法反推分类）
+    native/core/provider_maccms_generic_test.go ★ 上面那个的离线单测
+    native/core/provider_maccms_listnews_test.go ★ listnews 风格自定义源（/listnews/N 分类、/news/N 详情，如 gzmzpx.com）离线单测
+    native/core/provider_xbpq.go               ★ XBPQ/CatVod 爬虫规则引擎（截取语法 A&&B、p: 选择器、GBK、POST 搜索、多线播放串）
+    native/core/provider_xbpq_test.go          ★ 规则引擎离线单测（截取/选择器/POST 搜索/long-text/注册）
+    native/core/provider_custom_import_test.go ★ 导入导出离线单测（回环、TVBox sites、纯文本清单、垃圾输入）
+    注：provider_duanju_maccms.go 已接入 provider_maccms_generic.go 的几个函数，
+        所以新增这两个文件是本批次编译通过的前提（否则报 undefined: maccmsGenericItems 等）。
+    注：provider_xbpq.go 被 provider_custom_maccms.go / provider_duanju_maccms.go /
+        provider_duanju_dispatch.go 引用，同样是本批次编译通过的前提。
+
+三、本批次相对上次打包的「内容刷新」（同一批文件，代码已更新）
+    以下文件在本包内已被刷新为最新版（无需在 GitHub 上重新删除/新增，直接覆盖即可）：
+      native/core/app_categories.go            ★ 自定义源的分类 ID 允许路径形式（/listnews/2 等），不再误报"内容分类无效"
+      native/core/provider_duanju.go           ★ 同上，validDuanjuCategory 同步放行自定义源路径形式分类 ID
+      native/core/provider_duanju_maccms.go    ★ 新增 listxx 家族 + XBPQ 规则源分发（目录/详情/搜索/分类四处）
+      native/core/provider_maccms_generic.go   ★ 修复同站判定被放宽导致外链（other.example.com）被误收为剧集的回归
+      native/core/app_runtime.go               ★ 自定义源 rule 字段 + 导入导出 action
+      native/core/provider_custom_maccms.go    ★ XBPQ 规则录入 + 导入导出
+      native/server/main.go                    ★ /api/custom-sources/export + /import
+      lib/models.dart                          ★ CustomSourceSite.rule
+    说明：与 00-上传说明 初次打包时同名，只是内容又迭代了两轮，直接覆盖上传即可。
+
+四、必须在 GitHub 上删除（2 个）—— 不做会让 Go 编译失败
+    native/core/provider_sorani.go
+    native/core/provider_sorani_client.go
+    原因：这两个文件引用 sourceSorani 常量，而新版的 provider_huangguo.go 已删掉该常量，
+          只传上面那批覆盖文件而不删它们，会报 undefined: sourceSorani。
+
+五、不要提交的文件
+    .github/workflows/build.yml
+    本地那份把 push / pull_request 触发注释掉了，只剩 workflow_dispatch。
+    仓库里现在是启用状态，除非你确实想改成只能手动触发，否则别覆盖它。
+    （dist/ 与 build/ 是空目录，无需处理。）
+    native/server/web/index.html / app.css / hls.min.js：基线已有且本地未改动，无需提交。
+
+六、建议上传方式
+    A. 网页拖拽：把本文件夹里的全部内容（不含本说明）拖进仓库对应目录提交；
+       删除那两个文件要到 GitHub 打开该文件 → 右上角 Delete file → Commit。
+    B. 更稳妥（推荐，能保证"删除"也生效）：
+       git clone 仓库 → 用本文件夹内容覆盖同名文件 → git rm native/core/provider_sorani*.go
+       → git add -A && git commit && git push
+
+七、功能说明（本批两大新特性）
+    1. XBPQ 爬虫规则识别：自定义源录入时粘贴规则 JSON（wwgz 截取风格或
+       gimyai p: 选择器风格均可），核心按「数组/标题/链接/图片/播放数组…」
+       逐项截取，支持 || 备选、[包含:]/[替换:]、p: 选择器、GBK 转码、
+       POST 搜索、@long-text 合并、尾逗号修复、$$$ 多线播放串。
+       爬虫 jar（type=3 / spider）无法在 Go 核心执行，不渲染。
+    2. 导入导出：桌面/移动 App 的自定义源页 + Web 版均可「导出 JSON」「导入文件」。
+       导入兼容：自有导出格式 / 纯数组 / 「名称,网址」txt 清单 / TVBox 配置
+       （sites/whitelist 数组、maccms api 地址收敛、ext 内嵌规则、jar 条目逐条跳过）。
+       重复导入走更新而非报错；导出文件可直接喂回导入。

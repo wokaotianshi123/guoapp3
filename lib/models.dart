@@ -2,25 +2,34 @@ import 'dart:convert';
 
 import 'app_build.dart';
 
-/// 用户自定义的 MacCMS 站源记录。
+/// 用户自定义的 MacCMS / XBPQ 站源记录。
 class CustomSourceSite {
   const CustomSourceSite({
     required this.id,
     required this.name,
     required this.base,
+    this.rule = '',
   });
   final String id;
   final String name;
   final String base;
+  final String rule;
 
   factory CustomSourceSite.fromJson(Map<String, dynamic> json) =>
       CustomSourceSite(
         id: json['id'] as String? ?? '',
         name: json['name'] as String? ?? '',
         base: json['base'] as String? ?? '',
+        rule: json['rule'] as String? ?? '',
       );
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'base': base};
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'base': base,
+    if (rule.isNotEmpty) 'rule': rule,
+  };
   bool get isCustom => SourceSite.isCustomId(id);
+  bool get hasRule => rule.trim().isNotEmpty;
   SourceSite get asSourceSite => SourceSite(id, name, base);
 }
 

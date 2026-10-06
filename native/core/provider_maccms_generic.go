@@ -318,9 +318,11 @@ func maccmsGenericItems(document *html.Node, source, base string, limit int) []D
 }
 
 // maccmsGenericCategoryKey 把分类链接归一化成「骨架 + 分类 ID」：
-//   /vodtype/2.html            → /vodtype/{id}, 2
-//   /vodshow/1-----------.html → /vodshow/{id}, 1
-//   /index.php/vod/type/id/3.html → /index.php/vod/type/id/{id}, 3
+//
+//	/vodtype/2.html            → /vodtype/{id}, 2
+//	/vodshow/1-----------.html → /vodshow/{id}, 1
+//	/index.php/vod/type/id/3.html → /index.php/vod/type/id/{id}, 3
+//
 // 详情页（含 detail / play）一律排除。第三个返回值是归一化后的分类路径。
 func maccmsGenericCategoryKey(path string) (string, string, string, bool) {
 	clean := strings.TrimSuffix(path, ".html")
