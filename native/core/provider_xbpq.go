@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/html"
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -1379,19 +1380,21 @@ func (d *Downloader) xbpqDetail(ctx context.Context, source, base, sourceID stri
 	if actor := pick(rule.field("主演")); actor != "" {
 		drama.Tags = append(drama.Tags, "主演:"+actor)
 	}
-	episodes := xbpqEpisodes(body, pageURL, rule)
+	episodes, routeGroups := xbpqEpisodes(body, pageURL, rule)
 	if len(episodes) == 0 {
 		return Drama{}, nil, fmt.Errorf("规则未解析到分集")
 	}
 	var chapters []Chapter
 	number := 0
-	for _, episode := range episodes {
+	for index, episode := range episodes {
 		number++
 		link := xbpqJoinLink(pageURL, episode.url)
 		if link == "" {
 			continue
 		}
-		chapters = append(chapters, duanjuChapter(source, sourceID, number, episode.title, link, link, base+"/"))
+		chapter := duanjuChapter(source, sourceID, number, episode.title, link, link, base+"/")
+		chapter.Routes = xbpqAlternateRoutes(routeGroups, index, episode, link, pageURL)
+		chapters = append(chapters, chapter)
 	}
 	if len(chapters) == 0 {
 		return Drama{}, nil, fmt.Errorf("规则未解析到可播放分集")
@@ -1407,15 +1410,25 @@ type xbpqEpisode struct {
 }
 
 // xbpqEpisodes 解析播放串：播放数组→$$$ 线路→# 分集→标题$链接。
-// 取集数最多的一条线路（与 API 链路同策略）。
-func xbpqEpisodes(body, pageURL string, rule xbpqRule) []xbpqEpisode {
+// 返回「集数最多的那条线路」（与 API 链路同策略）与「全部线路」（供多线路切换）。
+// 规则写了「线路数组」时，按该 pattern 循环截取每个线路容器、用 $$$ 拼成多组；
+// 未写时退回「播放数组」单次截取（旧行为，完全不变）。
+func xbpqEpisodes(body, pageURL string, rule xbpqRule) ([]xbpqEpisode, [][]xbpqEpisode) {
 	arrayPattern := rule.field("播放数组")
 	if arrayPattern == "" {
-		return nil
+		return nil, nil
 	}
-	raw := xbpqCutOnce(body, arrayPattern)
+	raw := ""
+	if routeArray := rule.field("线路数组"); routeArray != "" {
+		if segments := xbpqList(body, routeArray); len(segments) > 0 {
+			raw = strings.Join(segments, "$$$")
+		}
+	}
 	if raw == "" {
-		return nil
+		raw = xbpqCutOnce(body, arrayPattern)
+	}
+	if raw == "" {
+		return nil, nil
 	}
 	raw = strings.ReplaceAll(raw, "\r\n", "#")
 	if index := strings.Index(raw, `\/`); index >= 0 {
@@ -1430,9 +1443,10 @@ func xbpqEpisodes(body, pageURL string, rule xbpqRule) []xbpqEpisode {
 	titlePattern := rule.field("播放标题")
 	linkPattern := rule.field("播放链接")
 	routePattern := rule.field("线路标题")
-	groups := strings.Split(raw, "$$$")
+	rawGroups := strings.Split(raw, "$$$")
 	var best []xbpqEpisode
-	for routeIndex, group := range groups {
+	var routes [][]xbpqEpisode
+	for routeIndex, group := range rawGroups {
 		group = strings.TrimSpace(group)
 		if group == "" {
 			continue
@@ -1476,33 +1490,104 @@ func xbpqEpisodes(body, pageURL string, rule xbpqRule) []xbpqEpisode {
 		if len(entries) > len(best) {
 			best = entries
 		}
+		if len(entries) > 0 {
+			routes = append(routes, entries)
+		}
 	}
 	// 相对播放地址（如仅数字 ID）用链接补全；纯文字条目丢弃。
-	var out []xbpqEpisode
-	for _, entry := range best {
+	absolutize := func(entry xbpqEpisode) (xbpqEpisode, bool) {
 		link := entry.url
 		if !strings.Contains(link, "://") && !strings.HasPrefix(link, "/") {
-			continue
+			return xbpqEpisode{}, false
 		}
 		if !strings.HasPrefix(link, "http") {
 			link = duanjuAbsolute(pageURL, link)
 		}
-		out = append(out, xbpqEpisode{title: entry.title, url: link})
+		return xbpqEpisode{title: entry.title, url: link}, true
+	}
+	var out []xbpqEpisode
+	for _, entry := range best {
+		if fixed, ok := absolutize(entry); ok {
+			out = append(out, fixed)
+		}
+	}
+	var outRoutes [][]xbpqEpisode
+	for _, group := range routes {
+		var fixed []xbpqEpisode
+		for _, entry := range group {
+			if item, ok := absolutize(entry); ok {
+				fixed = append(fixed, item)
+			}
+		}
+		if len(fixed) > 0 {
+			outRoutes = append(outRoutes, fixed)
+		}
+	}
+	return out, outRoutes
+}
+
+// xbpqAlternateRoutes 收集同一集在其它线路上的播放页地址，供播放时切换线路。
+// 同序号即视为同一集；标题不一致的线路整条跳过，避免集数不同导致的错位。
+func xbpqAlternateRoutes(groups [][]xbpqEpisode, index int, main xbpqEpisode, mainLink, pageURL string) []string {
+	if len(groups) < 2 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{mainLink: true}
+	for _, group := range groups {
+		if index >= len(group) {
+			continue
+		}
+		entry := group[index]
+		if entry.title != "" && main.title != "" && entry.title != main.title {
+			continue
+		}
+		link := xbpqJoinLink(pageURL, entry.url)
+		if link == "" || seen[link] {
+			continue
+		}
+		seen[link] = true
+		out = append(out, link)
 	}
 	return out
 }
 
 // xbpqResolvePage 播放页取直链：跳转播放链接模板 → 标准 player_data → MacCMS 嗅探兜底。
+// 多线路：主线路成功后并发解析其余线路填入 Variants（播放时可切换）；
+// 主线路失败则依次尝试其它线路，第一个成功的顶上。
 func (d *Downloader) xbpqResolveMedia(ctx context.Context, task Task, rule xbpqRule, base, name string) (providerMedia, error) {
 	pageURL := strings.TrimSpace(task.Chapter.PageURL)
 	address := strings.TrimSpace(task.Chapter.VideoURL)
 	referer := firstNonEmpty(task.Chapter.Referer, base+"/")
 	if isProviderHTTPMediaURL(address) && duanjuLooksLikeMedia(address) {
-		return d.prepareWebProviderMedia(ctx, providerMedia{URL: address, Referer: referer}, name)
+		media, err := d.prepareWebProviderMedia(ctx, providerMedia{URL: address, Referer: referer}, name)
+		if err == nil {
+			media.Variants = d.xbpqResolveRoutes(ctx, task.Chapter.Routes, rule, base, name)
+		}
+		return media, err
 	}
 	if pageURL == "" {
 		pageURL = address
 	}
+	media, err := d.xbpqResolveOne(ctx, pageURL, referer, rule, name)
+	if err == nil {
+		media.Variants = d.xbpqResolveRoutes(ctx, task.Chapter.Routes, rule, base, name)
+		return media, nil
+	}
+	for _, route := range task.Chapter.Routes {
+		if route == "" || route == pageURL {
+			continue
+		}
+		if alt, altErr := d.xbpqResolveOne(ctx, route, referer, rule, name); altErr == nil {
+			alt.Variants = d.xbpqResolveRoutes(ctx, xbpqWithout(task.Chapter.Routes, route), rule, base, name)
+			return alt, nil
+		}
+	}
+	return providerMedia{}, err
+}
+
+// xbpqResolveOne 单个播放页取直链。
+func (d *Downloader) xbpqResolveOne(ctx context.Context, pageURL, referer string, rule xbpqRule, name string) (providerMedia, error) {
 	body, err := d.xbpqFetch(ctx, pageURL, referer, rule.userAgent())
 	if err != nil {
 		return providerMedia{}, err
@@ -1537,6 +1622,66 @@ func (d *Downloader) xbpqResolveMedia(ctx context.Context, task Task, rule xbpqR
 		}
 	}
 	return providerMedia{}, fmt.Errorf("%s未解析到播放地址", name)
+}
+
+// xbpqResolveRoutes 并发解析其它线路，返回可切换的备选媒体；失败的线路自动剔除。
+// 并发上限 4，避免同时打太多请求到同一站点被限流；输出保持 routes 原顺序。
+func (d *Downloader) xbpqResolveRoutes(ctx context.Context, routes []string, rule xbpqRule, base, name string) []providerMedia {
+	var targets []string
+	for _, route := range routes {
+		route = strings.TrimSpace(route)
+		if route != "" {
+			targets = append(targets, route)
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	const maxConcurrent = 4
+	sem := make(chan struct{}, maxConcurrent)
+	results := make([]providerMedia, len(targets))
+	done := make([]bool, len(targets))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for index, route := range targets {
+		wg.Add(1)
+		go func(slot int, u string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			got, err := d.xbpqResolveOne(ctx, u, base+"/", rule, name)
+			if err != nil || got.URL == "" {
+				return
+			}
+			mu.Lock()
+			results[slot], done[slot] = got, true
+			mu.Unlock()
+		}(index, route)
+	}
+	wg.Wait()
+	var variants []providerMedia
+	for index, ok := range done {
+		if ok {
+			variants = append(variants, results[index])
+		}
+	}
+	return variants
+}
+
+// xbpqWithout 去掉指定项（用于把顶上来当主线路的从备选里剔除）。
+func xbpqWithout(routes []string, skip string) []string {
+	var out []string
+	for _, route := range routes {
+		if route == skip {
+			continue
+		}
+		out = append(out, route)
+	}
+	return out
 }
 
 func xbpqJumpValue(body, jump string) string {

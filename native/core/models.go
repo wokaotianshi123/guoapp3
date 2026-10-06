@@ -74,6 +74,8 @@ type Chapter struct {
 	MediaSize      int64           `json:"mediaSize"`
 	PageURL        string          `json:"pageUrl,omitempty"`
 	Referer        string          `json:"referer,omitempty"`
+	// Routes 同一集在其它播放线路上的播放页地址（XBPQ 自定义源多线路切换用）。
+	Routes []string `json:"routes,omitempty"`
 }
 
 func (c Chapter) EpisodeString(fallback int) string {

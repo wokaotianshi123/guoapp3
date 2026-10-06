@@ -267,3 +267,145 @@ func TestXBPQCustomSourceRegistration(t *testing.T) {
 		t.Fatal("规则源重载后规则丢失")
 	}
 }
+
+// ---- 多线路（线路数组）----
+//
+// 站点把每条线路渲染成独立的播放列表容器时，「播放数组」单次截取只能拿到第一条。
+// 「线路数组」按该 pattern 循环截取全部容器，$$$ 拼成多组，并把同集的其它线路
+// 挂到 Chapter.Routes 上供播放时切换。
+
+const xbpqMultiRouteRuleJSON = `{"主页url":"https://multi.example.com","分类":"电视剧$2","分类url":"https://multi.example.com/list/{cateId}-{catePg}.html","数组":"<li>&&</li>","标题":"title=\"&&\"","链接":"href=\"&&\"","影片名称":"<h1>&&</h1>","播放数组":"<ul class=\"playlist\">&&</ul>","线路数组":"<ul class=\"playlist\">&&</ul>","播放列表":"<li","播放标题":">&&</a>","播放链接":"href=\"&&\""}`
+
+const xbpqMultiRouteDetail = `<html><body><h1>多线路剧</h1>
+<ul class="playlist"><li><a href="/play/88-1-1.html">01</a></li><li><a href="/play/88-1-2.html">02</a></li></ul>
+<ul class="playlist"><li><a href="/play/88-2-1.html">01</a></li><li><a href="/play/88-2-2.html">02</a></li></ul>
+</body></html>`
+
+func TestXBPQRouteArrayBuildsChapterRoutes(t *testing.T) {
+	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = writer.Write([]byte(xbpqMultiRouteDetail))
+	})
+	rule, _ := parseXBPQRule(xbpqMultiRouteRuleJSON)
+	id := xbpqIDFromLink(server.URL+"/vod/88.html", false)
+	_, chapters, err := d.xbpqDetail(context.Background(), "custom:xbpqmulti", server.URL, id, rule)
+	if err != nil {
+		t.Fatalf("多线路详情失败: %v", err)
+	}
+	if len(chapters) != 2 {
+		t.Fatalf("主线路集数错误: %d", len(chapters))
+	}
+	// 两条线路各 2 集：主线路占其一，另一条作为备选按集序号对齐挂到每集上。
+	if len(chapters[0].Routes) != 1 || !strings.HasSuffix(chapters[0].Routes[0], "/play/88-2-1.html") {
+		t.Fatalf("第1集备选线路错误: %+v", chapters[0].Routes)
+	}
+	if len(chapters[1].Routes) != 1 || !strings.HasSuffix(chapters[1].Routes[0], "/play/88-2-2.html") {
+		t.Fatalf("第2集备选线路错误: %+v", chapters[1].Routes)
+	}
+}
+
+// 未写「线路数组」时行为必须完全不变：单次截取，不做多线路切分。
+func TestXBPQWithoutRouteArrayKeepsSingleRoute(t *testing.T) {
+	single := strings.Replace(xbpqMultiRouteRuleJSON, `,"线路数组":"<ul class=\"playlist\">&&</ul>"`, "", 1)
+	if strings.Contains(single, "线路数组") {
+		t.Fatal("测试样本未去掉线路数组字段")
+	}
+	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = writer.Write([]byte(xbpqMultiRouteDetail))
+	})
+	rule, _ := parseXBPQRule(single)
+	id := xbpqIDFromLink(server.URL+"/vod/88.html", false)
+	_, chapters, err := d.xbpqDetail(context.Background(), "custom:xbpqmulti", server.URL, id, rule)
+	if err != nil {
+		t.Fatalf("单线路详情失败: %v", err)
+	}
+	if len(chapters) != 2 {
+		t.Fatalf("集数错误: %d", len(chapters))
+	}
+	for _, chapter := range chapters {
+		if len(chapter.Routes) != 0 {
+			t.Fatalf("未声明线路数组却产生了备选线路: %+v", chapter.Routes)
+		}
+	}
+}
+
+// 解析播放地址时把其余线路并发解析进 Variants，主线路失败则由备选顶上。
+func TestXBPQResolveFillsRouteVariants(t *testing.T) {
+	var base string
+	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		path := request.URL.Path
+		if strings.HasSuffix(path, ".m3u8") || strings.HasSuffix(path, ".ts") {
+			writer.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\n" + base + "/seg.ts\n#EXT-X-ENDLIST\n"))
+			return
+		}
+		sid := "1"
+		if strings.Contains(path, "-2-") {
+			sid = "2"
+		}
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = writer.Write([]byte(`<html><body><script>var player_aaaa={"encrypt":0,"url":"` + base + `/` + sid + `.m3u8"};</script></body></html>`))
+	})
+	base = server.URL
+	rule, _ := parseXBPQRule(xbpqMultiRouteRuleJSON)
+	task := Task{
+		DramaID:    "custom:xbpqmulti:88",
+		DramaTitle: "多线路剧",
+		Chapter: Chapter{
+			Title:    "01",
+			PageURL:  server.URL + "/play/88-1-1.html",
+			VideoURL: server.URL + "/play/88-1-1.html",
+			Routes:   []string{server.URL + "/play/88-2-1.html"},
+		},
+	}
+	media, err := d.xbpqResolveMedia(context.Background(), task, rule, base, "多线路剧")
+	if err != nil {
+		t.Fatalf("多线路解析失败: %v", err)
+	}
+	if !strings.HasSuffix(media.URL, "/1.m3u8") {
+		t.Fatalf("主线路地址错误: %q", media.URL)
+	}
+	if len(media.Variants) != 1 || !strings.HasSuffix(media.Variants[0].URL, "/2.m3u8") {
+		t.Fatalf("备选线路未填充: %+v", media.Variants)
+	}
+}
+
+// 主线路挂了：应自动用备选线路顶上，而不是直接失败。
+func TestXBPQResolveFallsBackToAlternateRoute(t *testing.T) {
+	var base string
+	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		path := request.URL.Path
+		if strings.HasSuffix(path, ".m3u8") || strings.HasSuffix(path, ".ts") {
+			writer.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = writer.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\n" + base + "/seg.ts\n#EXT-X-ENDLIST\n"))
+			return
+		}
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// 线路1 无播放地址，线路2 正常
+		if strings.Contains(path, "-1-") {
+			_, _ = writer.Write([]byte(`<html><body><script>var player_aaaa={"encrypt":0,"url":""};</script></body></html>`))
+			return
+		}
+		_, _ = writer.Write([]byte(`<html><body><script>var player_aaaa={"encrypt":0,"url":"` + base + `/2.m3u8"};</script></body></html>`))
+	})
+	base = server.URL
+	rule, _ := parseXBPQRule(xbpqMultiRouteRuleJSON)
+	task := Task{
+		DramaID:    "custom:xbpqmulti:88",
+		DramaTitle: "多线路剧",
+		Chapter: Chapter{
+			Title:    "01",
+			PageURL:  server.URL + "/play/88-1-1.html",
+			VideoURL: server.URL + "/play/88-1-1.html",
+			Routes:   []string{server.URL + "/play/88-2-1.html"},
+		},
+	}
+	media, err := d.xbpqResolveMedia(context.Background(), task, rule, base, "多线路剧")
+	if err != nil {
+		t.Fatalf("主线路失效后未回落到备选线路: %v", err)
+	}
+	if !strings.HasSuffix(media.URL, "/2.m3u8") {
+		t.Fatalf("未使用备选线路: %q", media.URL)
+	}
+}
