@@ -124,6 +124,7 @@ type nativeInput struct {
 	Session          string                  `json:"session"`
 	Sequence         int64                   `json:"sequence"`
 	Force            bool                    `json:"force"`
+	AdBlock          *bool                   `json:"adBlock"`
 }
 
 type nativeCatalogResult struct {
@@ -501,6 +502,12 @@ func nativeDispatch(input nativeInput) (any, error) {
 			return nil, err
 		}
 		return result, nil
+	case "resetCustomSources":
+		removed, err := engine.resetCustomMaccmsSources()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"removed": removed}, nil
 	case "cover":
 		return engine.loadCover(ctx, input.Drama, input.Force)
 	case "prepareCover":
@@ -874,6 +881,8 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 	if series, video, valid := hongguoPlaybackIDs(task); valid {
 		choice.danmakuSeries, choice.danmakuVideo = series, video
 	}
+	// 去广告开关：请求未显式给出时默认开启。
+	choice.adBlock = input.AdBlock == nil || *input.AdBlock
 	choice.index = nativePreferredRoute(input.Route, len(choice.media))
 	return engine.nativeOpenPlayback(ctx, choice)
 }

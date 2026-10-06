@@ -9,6 +9,24 @@ var searchForm = document.getElementById('search-form');
 var AUTO_NEXT_KEY = 'duanjuweb:autoNext';
 // 倍速同样记在本地：切集会重建 <video>，不记下来就会被打回 1 倍速。
 var PLAY_RATE_KEY = 'duanjuweb:playbackRate';
+// 去广告开关默认开，记在本地；关闭后播放加载原画。
+var AD_BLOCK_KEY = 'duanjuweb:adBlock';
+
+function readAdBlock() {
+  try {
+    return window.localStorage.getItem(AD_BLOCK_KEY) !== 'off';
+  } catch (error) {
+    return true;
+  }
+}
+
+function writeAdBlock(value) {
+  try {
+    window.localStorage.setItem(AD_BLOCK_KEY, value ? 'on' : 'off');
+  } catch (error) {
+    // 隐私模式下写不了本地存储，只在当前会话生效。
+  }
+}
 
 var playbackRate = readPlaybackRate();
 var resumeFullscreen = false;
@@ -68,6 +86,7 @@ var state = {
   sourceNames: {},
   ffmpeg: true,
   autoNext: readAutoNext(),
+  adBlock: readAdBlock(),
   library: { history: [], favorites: [] },
   libraryTab: 'history',
   libraryEditing: false,
@@ -871,6 +890,9 @@ function stopPlayback() {
 }
 
 function apiPlay(payload) {
+  if (payload && payload.adBlock === undefined) {
+    payload.adBlock = state.adBlock;
+  }
   return fetch('/api/play', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1223,6 +1245,8 @@ function renderPlay(id, index, source) {
         ? '<label class="toggle" title="播完自动跳到下一集">' +
           '<input type="checkbox" id="auto-next"' + (state.autoNext ? ' checked' : '') + '>自动连播</label>'
         : '';
+      var adBlockBox = '<label class="toggle" title="播放前清洗 m3u8，剔除插播在时间线里的广告分片；关闭后加载原画">' +
+        '<input type="checkbox" id="ad-block"' + (state.adBlock ? ' checked' : '') + '>去广告</label>';
       var message = '';
       var kind = '';
       if (plan.message === '需要 ffmpeg 转码' || (plan.mode === 'direct' && plan.encrypted)) {
@@ -1248,6 +1272,7 @@ function renderPlay(id, index, source) {
         '<div class="notice next-up" id="next-up"></div>' +
         '<div class="player-bar">' + qualitySelect + routeSelect +
         '<span class="spacer"></span>' +
+        adBlockBox +
         autoNextBox +
         '<a class="btn" href="#/drama?id=' + encodeURIComponent(id) + suffix + '">返回详情</a>' +
         favorite +
@@ -1286,6 +1311,16 @@ function renderPlay(id, index, source) {
           if (!state.autoNext) {
             cancelAutoNext();
           }
+        });
+      }
+      var adBlockToggle = document.getElementById('ad-block');
+      if (adBlockToggle) {
+        adBlockToggle.addEventListener('change', function () {
+          state.adBlock = adBlockToggle.checked;
+          writeAdBlock(state.adBlock);
+          // 重新解析当前集让开关立即生效（核心按新会话清洗或放行原画）。
+          flushProgress();
+          renderPlay(id, index, source);
         });
       }
       var nextButton = document.getElementById('episode-next');
@@ -1512,6 +1547,55 @@ function customSourceImportText(content) {
   });
 }
 
+function customSourceImportUrl(url) {
+  return fetch('/api/custom-sources/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: url }),
+  }).then(function (response) {
+    return response.json().then(function (data) {
+      if (!data || data.ok !== true) {
+        throw new Error(data && data.error ? data.error : '导入远程配置失败');
+      }
+      return data.result || {};
+    });
+  });
+}
+
+function customSourceResetAll() {
+  return fetch('/api/custom-sources/reset', { method: 'POST' })
+    .then(function (response) {
+      return response.json();
+    })
+    .then(function (data) {
+      if (!data || data.ok !== true) {
+        throw new Error(data && data.error ? data.error : '恢复默认源失败');
+      }
+      return data.removed || 0;
+    });
+}
+
+function afterCustomSourcesChanged(result) {
+  return Promise.all([customSourceList(), loadSources()]).then(function (listResults) {
+    state.sourceNames = {};
+    (listResults[0] || []).forEach(function (item) {
+      state.sourceNames[item.id] = item.name;
+    });
+    renderCustomSources();
+    if (result) {
+      var added = (result.added || []).length;
+      var updated = (result.updated || []).length;
+      var notes = [].concat(result.skipped || [], result.failed || []);
+      var message = '导入完成：新增 ' + added + ' 个，更新 ' + updated + ' 个。';
+      if (notes.length) {
+        message += '\n' + notes.join('\n');
+      }
+      window.alert(message);
+    }
+    return listResults;
+  });
+}
+
 function customSourceRemove(id) {
   return fetch('/api/custom-sources/' + encodeURIComponent(id), { method: 'DELETE' })
     .then(function (response) {
@@ -1553,7 +1637,9 @@ function renderCustomSources() {
       '<span class="spacer"></span>' +
       '<input type="file" id="custom-import-file" accept=".json,.txt,application/json,text/plain" style="display:none" />' +
       '<button type="button" class="btn" id="custom-import">导入文件</button>' +
+      '<button type="button" class="btn" id="custom-import-url">导入网络地址</button>' +
       '<button type="button" class="btn" id="custom-export">导出 JSON</button>' +
+      '<button type="button" class="btn danger" id="custom-reset">恢复默认源</button>' +
       '<button type="button" class="btn" id="custom-add">新增</button>' +
       '</div>' +
       '<div style="font-size:12px;opacity:0.7;padding:4px 2px 8px">' +
@@ -1626,21 +1712,7 @@ function bindCustomSourcesView(items) {
         importButton.disabled = true;
         customSourceImportText(String(reader.result || ''))
           .then(function (result) {
-            return Promise.all([customSourceList(), loadSources()]).then(function (listResults) {
-              state.sourceNames = {};
-              (listResults[0] || []).forEach(function (item) {
-                state.sourceNames[item.id] = item.name;
-              });
-              var added = (result.added || []).length;
-              var updated = (result.updated || []).length;
-              var notes = [].concat(result.skipped || [], result.failed || []);
-              renderCustomSources();
-              var message = '导入完成：新增 ' + added + ' 个，更新 ' + updated + ' 个。';
-              if (notes.length) {
-                message += '\n' + notes.join('\n');
-              }
-              window.alert(message);
-            });
+            return afterCustomSourcesChanged(result);
           })
           .catch(function (error) {
             window.alert(error.message || '导入自定义源失败');
@@ -1650,6 +1722,34 @@ function bindCustomSourcesView(items) {
           });
       };
       reader.readAsText(file, 'utf-8');
+    });
+  }
+  var importUrlButton = document.getElementById('custom-import-url');
+  if (importUrlButton) {
+    importUrlButton.addEventListener('click', function () {
+      openCustomSourceImportUrlDialog();
+    });
+  }
+  var resetButton = document.getElementById('custom-reset');
+  if (resetButton) {
+    resetButton.addEventListener('click', function () {
+      var confirmed = window.confirm('将删除全部自定义源（含 XBPQ 规则），仅保留内置源。此操作不可撤销，建议先「导出 JSON」备份。\n\n确定恢复默认吗？');
+      if (!confirmed) {
+        return;
+      }
+      resetButton.disabled = true;
+      customSourceResetAll()
+        .then(function (removed) {
+          return afterCustomSourcesChanged(null).then(function () {
+            window.alert('已删除 ' + removed + ' 个自定义源，恢复为默认内置源。');
+          });
+        })
+        .catch(function (error) {
+          window.alert(error.message || '恢复默认源失败');
+        })
+        .then(function () {
+          resetButton.disabled = false;
+        });
     });
   }
   Array.prototype.forEach.call(view.querySelectorAll('[data-edit]'), function (button) {
@@ -1685,6 +1785,59 @@ function bindCustomSourcesView(items) {
         });
     });
   });
+}
+
+function openCustomSourceImportUrlDialog() {
+  var overlay = document.createElement('div');
+  overlay.style.cssText =
+    'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML =
+    '<div style="background:var(--panel,#1e2430);border:1px solid var(--border,#333);border-radius:12px;' +
+    'width:min(480px,92vw);padding:20px;box-sizing:border-box;max-height:90vh;overflow:auto">' +
+    '<h3 style="margin:0 0 14px">从网络地址导入</h3>' +
+    '<div style="font-size:12px;opacity:0.75;margin-bottom:10px">粘贴 TVBox 配置 / JSON / TXT 远程地址，核心自动抓取并解析导入；「导入文件」仍可本地选择。</div>' +
+    '<textarea id="cs-import-url" spellcheck="false" placeholder="https://…/config.json" ' +
+    'style="width:100%;min-height:70px;font-family:monospace;font-size:12px;box-sizing:border-box;background:var(--bg,#12161f);color:inherit;border:1px solid var(--border,#333);border-radius:8px;padding:8px"></textarea>' +
+    '<div id="cs-import-error" style="color:#ff8b90;font-size:12px;min-height:18px;margin-top:8px"></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">' +
+    '<button type="button" class="btn" id="cs-import-cancel">取消</button>' +
+    '<button type="button" class="btn" id="cs-import-go">导入</button>' +
+    '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  var urlInput = document.getElementById('cs-import-url');
+  var errorBox = document.getElementById('cs-import-error');
+  var goButton = document.getElementById('cs-import-go');
+  var cancelButton = document.getElementById('cs-import-cancel');
+  if (urlInput) urlInput.focus();
+  function close() {
+    document.body.removeChild(overlay);
+  }
+  if (cancelButton) cancelButton.addEventListener('click', close);
+  if (goButton) {
+    goButton.addEventListener('click', function () {
+      var url = (urlInput.value || '').trim();
+      if (!url) {
+        errorBox.textContent = '请填写配置地址';
+        return;
+      }
+      if (!/^https?:\/\//i.test(url)) {
+        errorBox.textContent = '地址需以 http:// 或 https:// 开头';
+        return;
+      }
+      goButton.disabled = true;
+      errorBox.textContent = '';
+      customSourceImportUrl(url)
+        .then(function (result) {
+          close();
+          return afterCustomSourcesChanged(result);
+        })
+        .catch(function (error) {
+          errorBox.textContent = error.message || '导入远程配置失败';
+          goButton.disabled = false;
+        });
+    });
+  }
 }
 
 function openCustomSourceEditor(existing) {

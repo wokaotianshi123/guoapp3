@@ -298,6 +298,21 @@ class _PlayerMenuState extends State<PlayerMenu> {
         ],
         if (all) ...[
           SwitchListTile.adaptive(
+            key: const ValueKey('player-adblock-enabled'),
+            contentPadding: EdgeInsets.zero,
+            title: const Text('去广告'),
+            subtitle: const Text('播放前清洗 m3u8，剔除插播在时间线里的广告分片；关闭后加载原画'),
+            value: preferences.adBlock,
+            onChanged: _busy
+                ? null
+                : (value) => _run(
+                    () => widget.onPreferences(
+                      preferences.copyWith(adBlock: value),
+                    ),
+                  ),
+          ),
+          const SizedBox(height: 8),
+          SwitchListTile.adaptive(
             key: const ValueKey('player-preload-enabled'),
             contentPadding: EdgeInsets.zero,
             title: const Text('下一集预加载'),

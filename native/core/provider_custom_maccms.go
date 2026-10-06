@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,10 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 // 自定义 maccms 源：用户可在应用内录入符合 MacCMS 模板的站点地址，
@@ -313,12 +318,98 @@ func customSourceExportFilename() string {
 	return "duanju-custom-sources-" + time.Now().Format("2006-01-02") + ".json"
 }
 
+// customSourceIsRemoteURL 判断整段内容是否为「一行远程配置地址」。
+// 带查询参数、或路径带配置文件后缀（.json/.txt/.bxtv 等）、或路径含 config 字样时判为配置地址；
+// 站点根地址（如 https://example.com 或 https://example.com:5200）按单站导入处理，不去抓取。
+var customSourceConfigExtensions = []string{".json", ".txt", ".bxtv", ".bxt", ".list", ".conf", ".ini", ".custom", ".cpm", ".xs", ".c"}
+
+func customSourceIsRemoteURL(content string) bool {
+	if strings.ContainsAny(content, "\n\r") {
+		return false
+	}
+	if len(content) > 2048 {
+		return false
+	}
+	parsed, err := url.Parse(content)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return false
+	}
+	if parsed.RawQuery != "" {
+		return true
+	}
+	path := strings.ToLower(parsed.Path)
+	if path == "" || path == "/" {
+		return false
+	}
+	if strings.Contains(path, "config") || strings.Contains(path, "tvbox") {
+		return true
+	}
+	for _, extension := range customSourceConfigExtensions {
+		if strings.HasSuffix(path, extension) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchCustomSourcesRemote 拉取远程配置文件文本（15 秒超时、8MB 上限、GBK 兜底转码）。
+func (engine *nativeEngine) fetchCustomSourcesRemote(address string) (string, error) {
+	if engine == nil || engine.downloader == nil {
+		return "", errors.New("核心尚未就绪，请稍后重试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	body, err := engine.downloader.duanjuDo(ctx, duanjuRequest{
+		Method:  "GET",
+		Address: address,
+		Timeout: 15 * time.Second,
+	})
+	if err != nil {
+		return "", fmt.Errorf("远程地址抓取失败：%v", err)
+	}
+	if len(body) == 0 {
+		return "", errors.New("远程地址返回空内容")
+	}
+	if len(body) > customSourceImportMaxBytes {
+		return "", errors.New("远程文件过大（上限 8MB）")
+	}
+	text := string(body)
+	text = strings.TrimPrefix(text, "\ufeff")
+	if !utf8.ValidString(text) {
+		if decoded, _, decodeErr := transform.String(simplifiedchinese.GB18030.NewDecoder(), text); decodeErr == nil {
+			text = decoded
+		}
+	}
+	return text, nil
+}
+
+// resetCustomMaccmsSources 清空全部自定义源，恢复为只有内置源的状态。
+func (engine *nativeEngine) resetCustomMaccmsSources() (int, error) {
+	registry := engine.customRegistry
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	removed := len(registry.sources)
+	registry.sources = map[string]customMaccmsSource{}
+	if err := registry.save(); err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
 // importCustomMaccmsSources 解析任意受支持文本并逐条落库；单条失败不影响其余。
+// content 若是一行远程地址（http/https），先抓取该地址的文本再解析。
 func (engine *nativeEngine) importCustomMaccmsSources(content string) (customSourceImportResult, error) {
 	result := customSourceImportResult{Added: []customMaccmsSource{}, Updated: []customMaccmsSource{}, Skipped: []string{}, Failed: []string{}}
-	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(strings.TrimSpace(content), "\ufeff")
 	if content == "" {
 		return result, errors.New("导入内容为空")
+	}
+	if customSourceIsRemoteURL(content) {
+		fetched, err := engine.fetchCustomSourcesRemote(content)
+		if err != nil {
+			return result, err
+		}
+		content = fetched
 	}
 	if len(content) > customSourceImportMaxBytes {
 		return result, errors.New("导入文件过大（上限 8MB）")
@@ -449,9 +540,11 @@ func customSourceDrafts(content string) ([]customSourceDraft, []string) {
 	}
 	var payload any
 	if json.Unmarshal([]byte(content), &payload) != nil {
-		// JSON 语法问题（尾逗号、注释）：修复后再试一次
-		if repaired := xbpqTrimTrailingComma(stripJSONComments(content)); json.Unmarshal([]byte(repaired), &payload) != nil {
-			return nil, []string{"文件不是合法 JSON"}
+		// JSON 语法问题（注释、字符串内裸控制符、尾逗号）：修复后再试一次
+		if repaired := repairJSONForImport(content); json.Unmarshal([]byte(repaired), &payload) != nil {
+			if repaired := xbpqTrimTrailingComma(stripJSONComments(content)); json.Unmarshal([]byte(repaired), &payload) != nil {
+				return nil, []string{"文件不是合法 JSON"}
+			}
 		}
 	}
 	switch typed := payload.(type) {
@@ -666,6 +759,84 @@ func entryNumberField(entry map[string]any, key string) int {
 		}
 	}
 	return -1
+}
+
+// repairJSONForImport 把 TVBox 风格的「JS 味」配置修成合法 JSON：
+// 字符串外的 // 与 /* */ 注释删除；字符串内的裸制表符/换行/回车转义；
+// 尾逗号清理。真实 TVBox 源里三种情况都常见，严格 json.Unmarshal 会全部拒绝。
+func repairJSONForImport(text string) string {
+	var builder strings.Builder
+	builder.Grow(len(text))
+	inString := false
+	escaped := false
+	for index := 0; index < len(text); {
+		char := text[index]
+		if inString {
+			switch {
+			case escaped:
+				// 上一字符是反斜杠：合法转义原样保留，非法转义（如 \'、\uXxxx）补成双反斜杠
+				switch char {
+				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u':
+					builder.WriteByte(char)
+				default:
+					builder.WriteString(`\`)
+					builder.WriteByte(char)
+				}
+				escaped = false
+			case char == '\\':
+				builder.WriteByte(char)
+				escaped = true
+			case char == '\\':
+				builder.WriteByte(char)
+				escaped = true
+			case char == '"':
+				builder.WriteByte(char)
+				inString = false
+			case char == '\t':
+				builder.WriteString(`\t`)
+			case char == '\n':
+				builder.WriteString(`\n`)
+			case char == '\r':
+				builder.WriteString(`\r`)
+			default:
+				builder.WriteByte(char)
+			}
+			index++
+			continue
+		}
+		switch char {
+		case '"':
+			builder.WriteByte(char)
+			inString = true
+			index++
+		case '/':
+			if index+1 < len(text) && text[index+1] == '/' {
+				for index < len(text) && text[index] != '\n' {
+					index++
+				}
+			} else if index+1 < len(text) && text[index+1] == '*' {
+				index += 2
+				for index+1 < len(text) && !(text[index] == '*' && text[index+1] == '/') {
+					if text[index] == '\n' {
+						builder.WriteByte('\n')
+					}
+					index++
+				}
+				if index+1 < len(text) {
+					index += 2
+				} else {
+					index = len(text)
+				}
+			} else {
+				builder.WriteByte(char)
+				index++
+			}
+		default:
+			builder.WriteByte(char)
+			index++
+		}
+	}
+	return xbpqTrimTrailingComma(builder.String())
 }
 
 // stripJSONComments 去掉 // 行注释，便于导入手写配置。

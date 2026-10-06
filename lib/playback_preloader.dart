@@ -40,9 +40,10 @@ class PlaybackPreloader extends ChangeNotifier {
     int quality,
     int route,
     bool online,
+    bool adBlock,
   ) =>
       '${drama.id}\u0000${episode.number}\u0000$quality'
-      '\u0000$route\u0000$online';
+      '\u0000$route\u0000$online\u0000$adBlock';
 
   void prepare(
     Drama drama,
@@ -50,9 +51,10 @@ class PlaybackPreloader extends ChangeNotifier {
     int quality = 0,
     bool online = false,
     int route = 0,
+    bool adBlock = true,
   }) {
     if (_closed) return;
-    final identity = _key(drama, episode, quality, route, online);
+    final identity = _key(drama, episode, quality, route, online, adBlock);
     if (_identity != identity) {
       clear();
       _identity = identity;
@@ -80,6 +82,7 @@ class PlaybackPreloader extends ChangeNotifier {
           quality: quality,
           online: online,
           route: route,
+          adBlock: adBlock,
         );
         if (_closed || ticket != _generation) {
           if (plan != null) await repository.release(plan.session);
@@ -122,9 +125,10 @@ class PlaybackPreloader extends ChangeNotifier {
     int quality = 0,
     bool online = false,
     int route = 0,
+    bool adBlock = true,
   }) {
     final result =
-        _identity == _key(drama, episode, quality, route, online) &&
+        _identity == _key(drama, episode, quality, route, online, adBlock) &&
             _now().isBefore(_expires)
         ? _ready
         : null;

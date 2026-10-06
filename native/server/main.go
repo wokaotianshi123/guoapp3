@@ -697,6 +697,25 @@ func customSourceImport(content string) (map[string]any, error) {
 	return reply.Data, nil
 }
 
+// customSourceReset 清空全部自定义源，恢复默认内置源状态。
+func customSourceReset() (int, error) {
+	var reply struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Removed int `json:"removed"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(core.NativeRequest(`{"action":"resetCustomSources"}`)), &reply); err != nil || !reply.OK {
+		message := strings.TrimSpace(reply.Error)
+		if message == "" {
+			message = "恢复默认失败"
+		}
+		return 0, errors.New(message)
+	}
+	return reply.Data.Removed, nil
+}
+
 // customSourceError 把失败写成前端可解析的 JSON，前端据此显示真实的错误原因。
 func customSourceError(writer http.ResponseWriter, message string) {
 	writeJSON(writer, map[string]any{"ok": false, "error": message})
@@ -730,15 +749,21 @@ func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
 			customSourceError(writer, "读取导入文件失败")
 			return
 		}
-		// 允许直接上传文件体，也允许 {"content": "..."} 包装
+		// 允许三种请求体：① {"url":"https://…/config.json"} 远程地址导入
+		// ② {"content":"…"} 包装 ③ 直接上传文件体
 		content := string(body)
 		var wrapped struct {
 			Content string `json:"content"`
+			URL     string `json:"url"`
 		}
-		if json.Unmarshal(body, &wrapped) == nil && strings.TrimSpace(wrapped.Content) != "" && strings.TrimSpace(content)[0] == '{' {
-			var probe map[string]any
-			if json.Unmarshal(body, &probe) == nil && probe["content"] != nil {
-				content = wrapped.Content
+		if json.Unmarshal(body, &wrapped) == nil {
+			if strings.TrimSpace(wrapped.URL) != "" {
+				content = strings.TrimSpace(wrapped.URL)
+			} else if strings.TrimSpace(wrapped.Content) != "" && strings.TrimSpace(content)[0] == '{' {
+				var probe map[string]any
+				if json.Unmarshal(body, &probe) == nil && probe["content"] != nil {
+					content = wrapped.Content
+				}
 			}
 		}
 		result, err := customSourceImport(content)
@@ -747,6 +772,19 @@ func handleCustomSources(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 		writeJSON(writer, map[string]any{"ok": true, "result": result})
+		return
+	}
+	if request.URL.Path == "/api/custom-sources/reset" {
+		if request.Method != http.MethodPost {
+			customSourceError(writer, "恢复默认不支持该请求方法")
+			return
+		}
+		removed, err := customSourceReset()
+		if err != nil {
+			customSourceError(writer, err.Error())
+			return
+		}
+		writeJSON(writer, map[string]any{"ok": true, "removed": removed})
 		return
 	}
 	switch request.Method {

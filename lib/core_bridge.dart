@@ -80,7 +80,8 @@ abstract class AppRepository {
     Episode episode, {
     int quality = 0,
     int route = 0,
-  }) => preload(drama, episode, quality: quality, route: route);
+    bool adBlock = true,
+  }) => preload(drama, episode, quality: quality, route: route, adBlock: adBlock);
   Future<void> cancelHandoff() async {}
   Future<ResourceSettings> resourceSettings() async => const ResourceSettings();
   Future<ResourceSettings> saveResourceSettings(
@@ -94,6 +95,7 @@ abstract class AppRepository {
     int quality = 0,
     bool online = false,
     int route = 0,
+    bool adBlock = true,
   }) async => null;
   Future<void> cancelDanmaku() async {}
   Future<DanmakuPage> danmaku(
@@ -148,7 +150,12 @@ abstract class AppRepository {
   Future<String> exportCustomSources() async =>
       throw AppFailure('当前环境不支持自定义源');
   /// 导入自定义源文本，返回 {added, updated, skipped, failed} 计数与原因。
+  /// content 既可以是本地 JSON/TXT 文本，也可以是一行远程配置地址，
+  /// 原生核心会自动识别并抓取。
   Future<Map<String, dynamic>> importCustomSources(String content) async =>
+      throw AppFailure('当前环境不支持自定义源');
+  /// 恢复默认：删除全部自定义源，仅保留内置源。返回删除数量。
+  Future<int> resetCustomSources() async =>
       throw AppFailure('当前环境不支持自定义源');
   Future<List<String>> suggestions(String query) async => const [];
   Future<Map<String, dynamic>> storage() async => {};
@@ -195,7 +202,8 @@ abstract class AppRepository {
     Episode episode, {
     int quality = 0,
     int route = 0,
-  }) => resolve(drama, episode, quality: quality, route: route);
+    bool adBlock = true,
+  }) => resolve(drama, episode, quality: quality, route: route, adBlock: adBlock);
   Future<void> initialize();
   Future<CatalogPage> catalog(
     String source, {
@@ -212,6 +220,7 @@ abstract class AppRepository {
     Episode episode, {
     int quality = 0,
     int route = 0,
+    bool adBlock = true,
   });
   Future<PlaybackPlan> fallback(PlaybackPlan current);
   Future<PlaybackPlan> selectRoute(PlaybackPlan current, int route) =>
@@ -241,6 +250,7 @@ class NativeRepository extends AppRepository {
     Episode episode, {
     int quality = 0,
     int route = 0,
+    bool adBlock = true,
   }) async {
     final data = await _read('handoff', {
       'action': 'prepareHandoff',
@@ -249,6 +259,7 @@ class NativeRepository extends AppRepository {
       'index': episode.number,
       'quality': quality,
       'route': route,
+      'adBlock': adBlock,
       'force': access != null && !access!.canDownload,
     });
     return PlaybackPlan.fromJson(data);
@@ -331,6 +342,7 @@ class NativeRepository extends AppRepository {
     int quality = 0,
     bool online = false,
     int route = 0,
+    bool adBlock = true,
   }) async => PlaybackPlan.fromJson(
     await _read('preload', {
       'action': 'preload',
@@ -339,6 +351,7 @@ class NativeRepository extends AppRepository {
       'index': episode.number,
       'quality': quality,
       'route': route,
+      'adBlock': adBlock,
       'force': online || access?.canDownload == false,
     }),
   );
@@ -538,6 +551,13 @@ class NativeRepository extends AppRepository {
       'content': content,
     });
     return Map<String, dynamic>.from(result as Map);
+  }
+
+  @override
+  Future<int> resetCustomSources() async {
+    _adminPermission();
+    final result = await _call({'action': 'resetCustomSources'});
+    return (result as Map)['removed'] as int? ?? 0;
   }
 
   void _authorize(String source, {bool download = false}) {
@@ -828,6 +848,7 @@ class NativeRepository extends AppRepository {
     Episode episode, {
     int quality = 0,
     int route = 0,
+    bool adBlock = true,
   }) async => PlaybackPlan.fromJson(
     await _call({
       'action': 'resolve',
@@ -836,6 +857,7 @@ class NativeRepository extends AppRepository {
       'index': episode.number,
       'quality': quality,
       'route': route,
+      'adBlock': adBlock,
       'sequence': ++_playbackSequence,
     }),
   );
@@ -996,6 +1018,7 @@ class NativeRepository extends AppRepository {
     Episode episode, {
     int quality = 0,
     int route = 0,
+    bool adBlock = true,
   }) async => PlaybackPlan.fromJson(
     await _call({
       'action': 'resolve',
@@ -1004,6 +1027,7 @@ class NativeRepository extends AppRepository {
       'index': episode.number,
       'quality': quality,
       'route': route,
+      'adBlock': adBlock,
       'force': true,
       'sequence': ++_playbackSequence,
     }),

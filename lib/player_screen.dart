@@ -110,6 +110,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _episodePanelVisible = true;
   int _mobileTab = 0;
   bool _autoAdvance = true;
+  bool _adBlock = true;
   bool? _systemFullscreen;
   Orientation? _lastOrientation;
   bool _closed = false;
@@ -151,6 +152,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     autoAdvance: _autoAdvance,
     danmaku: _danmakuEnabled,
     preload: _preloadEnabled,
+    adBlock: _adBlock,
     enhancement: _enhancement.preferences,
   );
   String get _qualityLabel => _plan?.local == true
@@ -179,6 +181,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _requestedQuality = preferences.quality;
     _autoAdvance = true;
     _danmakuEnabled = preferences.danmaku;
+    _adBlock = preferences.adBlock;
     _preloadEnabled = true;
     _loader = PlaybackLoader(widget.repository);
     _preloader = PlaybackPreloader(widget.repository);
@@ -702,6 +705,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.detail.episodes[_index + 1],
       quality: _requestedQuality,
       route: _routeIndex,
+      adBlock: _adBlock,
     );
   }
 
@@ -949,6 +953,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 quality: _requestedQuality,
                 route: _routeIndex,
                 online: _forceOnline,
+                adBlock: _adBlock,
               )
             : null);
     _preloader.clear();
@@ -1023,6 +1028,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           route: routeSelection ?? _routeIndex,
           localOnly: widget.localOnly,
           online: _forceOnline,
+          adBlock: _adBlock,
         );
       }
       if (prepared == null) {
@@ -1227,6 +1233,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       throw StateError('当前用户已变更');
     }
     _interactions.cancel();
+    final adBlockChanged = preferences.adBlock != _adBlock;
     final nextPreferences = preferences.copyWith(
       autoAdvance: true,
       preload: true,
@@ -1241,16 +1248,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       _requestedQuality = nextPreferences.quality;
       _autoAdvance = true;
       _danmakuEnabled = nextPreferences.danmaku;
+      _adBlock = nextPreferences.adBlock;
       _preloadEnabled = true;
     });
     _danmaku.setEnabled(_danmakuEnabled);
     _syncDanmaku();
-    if (qualityChanged) _preloader.clear();
+    if (qualityChanged || adBlockChanged) _preloader.clear();
     _syncPreload();
     _menuRevision.value++;
     await _interactions.applySpeed();
     if (qualityChanged && _plan?.local != true) {
       await _retry(quality: nextPreferences.quality);
+    } else if (adBlockChanged && _plan?.local != true) {
+      // 去广告开关按会话生效：重建播放会话让核心按新标志清洗或放行原画。
+      await _retry();
     }
   }
 

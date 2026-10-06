@@ -17,6 +17,7 @@ type nativePlaybackChoice struct {
 	qualities     []int
 	streamSession string
 	created       time.Time
+	adBlock       bool
 }
 
 func nativePlaybackChoices(media providerMedia, quality int) nativePlaybackChoice {
@@ -94,7 +95,7 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 		if err != nil {
 			return nativePlan{}, err
 		}
-		plan.URL, choice.streamSession = stream.nativeOpen(media)
+		plan.URL, choice.streamSession = stream.nativeOpen(media, choice.adBlock)
 	}
 	choice.created = time.Now()
 	engine.mu.Lock()

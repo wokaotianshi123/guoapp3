@@ -96,17 +96,15 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
 
   Future<void> _import() async {
     if (_busy) return;
-    final file = await FilePicker.pickFile(
-      type: FileType.custom,
-      allowedExtensions: ['json', 'txt'],
+    final content = await showDialog<String>(
+      context: context,
+      builder: (_) => _CustomSourceImportDialog(),
     );
-    if (file == null || !mounted) return;
-    final size = await file.length();
-    if (size == null || size > 8 * 1024 * 1024) {
-      _showMessage('导入文件过大或无法读取');
-      return;
-    }
-    final content = utf8.decode(await file.readAsBytes());
+    if (content == null || content.trim().isEmpty || !mounted) return;
+    await _runImport(content.trim());
+  }
+
+  Future<void> _runImport(String content) async {
     setState(() => _busy = true);
     try {
       final result = await widget.repository.importCustomSources(content);
@@ -115,6 +113,43 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
       );
       if (!mounted) return;
       _showImportResult(result);
+    } catch (error) {
+      if (mounted) _showMessage(error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _reset() async {
+    if (_busy) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('恢复默认源'),
+        content: const Text(
+          '将删除全部自定义源（含 XBPQ 规则），仅保留内置源。'
+          '此操作不可撤销，建议先「导出 JSON」备份。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确认恢复'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final removed = await widget.repository.resetCustomSources();
+      await widget.store.syncCustomSources(
+        await widget.repository.customSources(),
+      );
+      if (mounted) _showMessage('已删除 $removed 个自定义源，恢复为默认内置源');
     } catch (error) {
       if (mounted) _showMessage(error.toString());
     } finally {
@@ -232,9 +267,15 @@ class _CustomSourcesScreenState extends State<CustomSourcesScreen> {
           ),
           IconButton(
             key: const ValueKey('custom-source-import'),
-            tooltip: '导入文件',
+            tooltip: '导入（文件或网络地址）',
             onPressed: _busy ? null : () => unawaited(_import()),
             icon: const Icon(Icons.download_rounded),
+          ),
+          IconButton(
+            key: const ValueKey('custom-source-reset'),
+            tooltip: '恢复默认源',
+            onPressed: _busy ? null : () => unawaited(_reset()),
+            icon: const Icon(Icons.restore_rounded),
           ),
           const SizedBox(width: 4),
           FilledButton.icon(
@@ -507,6 +548,127 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
           onPressed: _busy ? null : _save,
           child: Text(_busy ? '保存中…' : '保存'),
         ),
+      ],
+    );
+  }
+}
+
+/// 导入方式选择弹窗：本地文件（JSON/TXT）或远程网络配置地址。
+class _CustomSourceImportDialog extends StatefulWidget {
+  const _CustomSourceImportDialog();
+
+  @override
+  State<_CustomSourceImportDialog> createState() =>
+      _CustomSourceImportDialogState();
+}
+
+class _CustomSourceImportDialogState extends State<_CustomSourceImportDialog> {
+  final TextEditingController _url = TextEditingController();
+  bool _fileMode = true;
+
+  @override
+  void dispose() {
+    _url.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickFile() async {
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['json', 'txt'],
+    );
+    if (file == null || !mounted) return;
+    final size = await file.length();
+    if (size == null || size > 8 * 1024 * 1024) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(content: Text('导入文件过大或无法读取')));
+      return;
+    }
+    try {
+      final content = utf8.decode(await file.readAsBytes());
+      if (mounted) Navigator.pop(context, content);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            const SnackBar(content: Text('导入文件不是有效的 UTF-8 文本')),
+          );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('导入自定义源'),
+      content: SizedBox(
+        width: 460,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('从网络地址导入'),
+              subtitle: const Text(
+                '粘贴 TVBox 配置 / JSON / TXT 地址，核心自动抓取解析',
+                style: TextStyle(fontSize: 12),
+              ),
+              value: !_fileMode,
+              onChanged: (value) => setState(() => _fileMode = !value),
+            ),
+            if (_fileMode)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('选择本地 JSON / TXT 文件导入。'),
+                    const SizedBox(height: 12),
+                    FilledButton.tonalIcon(
+                      key: const ValueKey('custom-source-import-file'),
+                      onPressed: () => unawaited(_pickFile()),
+                      icon: const Icon(Icons.folder_open_rounded, size: 20),
+                      label: const Text('选择文件'),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: TextField(
+                  key: const ValueKey('custom-source-import-url'),
+                  controller: _url,
+                  autofocus: true,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: '配置地址',
+                    hintText: 'https://…/config.json',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        if (!_fileMode)
+          FilledButton(
+            key: const ValueKey('custom-source-import-submit'),
+            onPressed: () {
+              final url = _url.text.trim();
+              if (url.isEmpty) return;
+              Navigator.pop(context, url);
+            },
+            child: const Text('导入'),
+          ),
       ],
     );
   }

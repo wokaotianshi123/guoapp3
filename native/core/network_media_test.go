@@ -77,7 +77,7 @@ func TestHuangguoMediaUsesBrowserSessionPageRefererAndPreviewToken(t *testing.T)
 		t.Fatal(err)
 	}
 	defer stream.server.Close()
-	address, token := stream.nativeOpen(media)
+	address, token := stream.nativeOpen(media, false)
 	defer stream.nativeRelease(token)
 	read := func(address string) string {
 		t.Helper()

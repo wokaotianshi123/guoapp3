@@ -225,6 +225,7 @@ extension LanPlayback on LanController {
         detail.drama,
         detail.episodes[index],
         quality: store.playbackPreferences.quality,
+        adBlock: store.playbackPreferences.adBlock,
       );
       if (plan == null || plan.url.isEmpty) throw StateError('接收端未能取得播放资源');
       if (pending.cancelled ||
