@@ -74,6 +74,7 @@ class FixtureRepository extends AppRepository {
   Future<PlaybackPlan> resolve(
     Drama drama,
     Episode episode, {
+    bool adBlock = true,
     int quality = 0,
     int route = 0,
   }) async => const PlaybackPlan(url: 'https://example.test/synthetic.mp4');

@@ -17,6 +17,7 @@ class DeferredRepository extends FixtureRepository {
   Future<PlaybackPlan> resolve(
     Drama drama,
     Episode episode, {
+    bool adBlock = true,
     int quality = 0,
     int route = 0,
   }) {

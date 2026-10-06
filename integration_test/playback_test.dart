@@ -67,12 +67,14 @@ class DeviceFixtureRepository extends AppRepository {
   Future<PlaybackPlan> resolve(
     Drama drama,
     Episode episode, {
+    bool adBlock = true,
     int quality = 0,
     int route = 0,
   }) async {
     final plan = await native.resolve(
       drama,
       episode,
+      adBlock: adBlock,
       quality: quality,
       route: route,
     );
@@ -194,6 +196,7 @@ class RecoveryFixtureRepository extends DeviceFixtureRepository {
   Future<PlaybackPlan> resolve(
     Drama drama,
     Episode episode, {
+    bool adBlock = true,
     int quality = 0,
     int route = 0,
   }) {
