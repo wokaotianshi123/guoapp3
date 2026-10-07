@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -407,5 +408,67 @@ func TestXBPQResolveFallsBackToAlternateRoute(t *testing.T) {
 	}
 	if !strings.HasSuffix(media.URL, "/2.m3u8") {
 		t.Fatalf("未使用备选线路: %q", media.URL)
+	}
+}
+
+// ---- json 模式（笔记 item 7）/ Base64（item 8）/ 字面量字段（item 1）----
+
+const xbpqJSONListBody = `{"code":0,"data":{"list":[{"name":"剧一","vid":"v1","pic":"/p/1.jpg"},{"name":"剧二","vid":"v2","pic":"/p/2.jpg"}]}}`
+
+const xbpqJSONRuleJSON = `{"主页url":"https://j.example.com","分类url":"https://j.example.com/api/list?id={cateId}","分类":"短剧$1","数组":"j:data.list","标题":"j:name","链接":"/book/+j:vid","图片":"j:pic"}`
+
+func TestXBPQJSONModeCutAndList(t *testing.T) {
+	if got := xbpqCutOnce(xbpqJSONListBody, "j:data.list[0].name"); got != "剧一" {
+		t.Fatalf("j: 取值错误: %q", got)
+	}
+	if got := xbpqCutOnce(xbpqJSONListBody, "j:nope.x"); got != "" {
+		t.Fatalf("不存在的路径应返回空: %q", got)
+	}
+	// 笔记 item 1：不含 && 的字段值是「指定字符串」
+	if got := xbpqCutOnce("<html>x</html>", "正片"); got != "正片" {
+		t.Fatalf("字面量字段失败: %q", got)
+	}
+	// Base64（item 8）
+	encoded := base64.StdEncoding.EncodeToString([]byte("hello-xbpq"))
+	if got := xbpqCutOnce(encoded, "Base64"); got != "hello-xbpq" {
+		t.Fatalf("Base64 整段解码失败: %q", got)
+	}
+	if got := xbpqCutOnce(`d="`+encoded+`"`, `Base64(d="&&")`); got != "hello-xbpq" {
+		t.Fatalf("Base64() 包裹截取失败: %q", got)
+	}
+	// j: 数组迭代 + 元素内取值 + URL 拼接
+	rows := xbpqList(xbpqJSONListBody, "j:data.list")
+	if len(rows) != 2 {
+		t.Fatalf("j:data.list 应迭代 2 条, 实际 %d", len(rows))
+	}
+	if got := xbpqCutOnce(rows[1], "j:name"); got != "剧二" {
+		t.Fatalf("元素内 j:name 失败: %q", got)
+	}
+	if got := xbpqCutOnce(rows[0], "/book/+j:vid"); got != "/book/v1" {
+		t.Fatalf("字面+j: 拼接失败: %q", got)
+	}
+}
+
+func TestXBPQJSONModeCatalog(t *testing.T) {
+	d, server := xbpqFixtureServer(t, func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = writer.Write([]byte(xbpqJSONListBody))
+	})
+	rule, ok := parseXBPQRule(xbpqJSONRuleJSON)
+	if !ok {
+		t.Fatal("json 模式规则解析失败")
+	}
+	d.providerMu.Lock()
+	d.providerHosts["custom:jsontest"] = server.URL
+	d.providerMu.Unlock()
+	items, _, err := d.xbpqCatalog(context.Background(), "custom:jsontest", server.URL, 1, "1", rule)
+	if err != nil {
+		t.Fatalf("json 目录失败: %v", err)
+	}
+	if len(items) != 2 || items[0].Title != "剧一" {
+		t.Fatalf("期望 2 条 json 条目: %+v", items)
+	}
+	if got := xbpqLinkFromID(server.URL, items[0].SourceID); !strings.HasSuffix(got, "/book/v1") {
+		t.Fatalf("j: 拼接链接错误: %q", got)
 	}
 }

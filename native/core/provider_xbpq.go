@@ -102,10 +102,13 @@ func parseXBPQRule(text string) (xbpqRule, bool) {
 	default:
 		return xbpqRule{}, false
 	}
-	if fields["主页url"] == "" && fields["首页url"] == "" && fields["请求"] == "" {
+	if fields["主页url"] == "" && fields["首页url"] == "" && fields["请求"] == "" &&
+		fields["分类url"] == "" && fields["分类Url"] == "" {
 		return xbpqRule{}, false // 不是 XBPQ 爬虫 JSON
 	}
-	return xbpqRule{fields: fields, order: order}, true
+	rule := xbpqRule{fields: fields, order: order}
+	rule.xbpqApplyTemplate() // 简写：按 分类url 形态补齐内置模板（对齐 jar）
+	return rule, true
 }
 
 func xbpqStringValue(value any) string {
@@ -187,6 +190,16 @@ func (r xbpqRule) field(names ...string) string {
 func (r xbpqRule) homeURL() string {
 	value := r.field("主页url", "首页url", "请求")
 	if value == "" {
+		// 简写规则：主页从 分类url/搜索url 的站点根推导（XBPQ jar 同行为，
+		// 实测 334 份源中 61% 不写主页url）。
+		for _, alt := range []string{"分类url", "分类Url", "搜索url"} {
+			if category := r.field(alt); strings.HasPrefix(category, "http") {
+				value = xbpqHostOrigin(category)
+				break
+			}
+		}
+	}
+	if value == "" {
 		return ""
 	}
 	if !strings.Contains(value, "://") {
@@ -229,10 +242,140 @@ type xbpqStep struct {
 	contains    []string
 	notContains []string
 	replaces    [][2]string
-	index       int // [含序号:n] / [序号:n]，1 起；0 表示不启用
+	order       []string // [排序:a>b>c]，按关键词给条目排优先级
+	index       int      // [含序号:n] / [序号:n]，1 起；0 表示不启用
 }
 
-var xbpqModifierKeyword = regexp.MustCompile(`^(包含|不包含|替换|序号|含序号|截右|右截)$`)
+var xbpqModifierKeyword = regexp.MustCompile(`^(包含|不包含|替换|序号|含序号|截右|右截|排序)$`)
+
+// xbpqSplitUnescaped 按分隔符切分，但跳过被反斜杠 \ 转义的分隔符（XBPQ 转义符语义：
+// \$ \# \& \* \[ \] 表示该字符是本义而非连接符）。
+func xbpqSplitUnescaped(s, sep string) []string {
+	if sep == "" {
+		return []string{s}
+	}
+	var out []string
+	var cur strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\\' && i+1 < len(s) {
+			cur.WriteByte(s[i])
+			cur.WriteByte(s[i+1])
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(s[i:], sep) {
+			out = append(out, cur.String())
+			cur.Reset()
+			i += len(sep)
+			continue
+		}
+		cur.WriteByte(s[i])
+		i++
+	}
+	out = append(out, cur.String())
+	return out
+}
+
+// xbpqUnescape 去掉转义：\$ \# \& \* \[ \] \\ → 原字符。
+func xbpqUnescape(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '$', '#', '&', '*', '[', ']', '\\':
+				b.WriteByte(s[i+1])
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// xbpqAnchor 把截取锚点（可能含 * 通配符与 \ 转义）编译成惰性正则并缓存。
+type xbpqAnchor struct {
+	re      *regexp.Regexp
+	literal string // 无通配符时的纯字面串（快路径）
+}
+
+var xbpqAnchorCache sync.Map
+
+func xbpqCompileAnchor(pattern string) xbpqAnchor {
+	if a, ok := xbpqAnchorCache.Load(pattern); ok {
+		return a.(xbpqAnchor)
+	}
+	a := xbpqBuildAnchor(pattern)
+	xbpqAnchorCache.Store(pattern, a)
+	return a
+}
+
+func xbpqBuildAnchor(pattern string) xbpqAnchor {
+	if !strings.ContainsAny(pattern, "*\\") {
+		return xbpqAnchor{literal: pattern}
+	}
+	var b strings.Builder
+	b.WriteString(`(?s)`)
+	for i := 0; i < len(pattern); {
+		c := pattern[i]
+		if c == '\\' && i+1 < len(pattern) {
+			b.WriteString(regexp.QuoteMeta(string(pattern[i+1])))
+			i += 2
+			continue
+		}
+		if c == '*' {
+			b.WriteString(`.*?`) // 惰性：一个字段仅一个通配符
+			i++
+			continue
+		}
+		b.WriteString(regexp.QuoteMeta(string(c)))
+		i++
+	}
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return xbpqAnchor{literal: xbpqUnescape(pattern)}
+	}
+	return xbpqAnchor{re: re}
+}
+
+// xbpqMatchStart 返回 source 中锚点匹配「结束处」的偏移（内容起点）；找不到 -1。
+func xbpqMatchStart(a xbpqAnchor, source string) int {
+	_, end := xbpqMatchStartFrom(a, source, 0)
+	return end
+}
+
+func xbpqMatchStartFrom(a xbpqAnchor, source string, offset int) (int, int) {
+	if offset > len(source) {
+		return -1, -1
+	}
+	sub := source[offset:]
+	if a.literal != "" && a.re == nil {
+		index := strings.Index(sub, a.literal)
+		if index < 0 {
+			return -1, -1
+		}
+		return offset + index, offset + index + len(a.literal)
+	}
+	loc := a.re.FindStringIndex(sub)
+	if loc == nil {
+		return -1, -1
+	}
+	return offset + loc[0], offset + loc[1]
+}
+
+func xbpqMatchEnd(a xbpqAnchor, source string) int {
+	if a.literal != "" && a.re == nil {
+		return strings.Index(source, a.literal)
+	}
+	loc := a.re.FindStringIndex(source)
+	if loc == nil {
+		return -1
+	}
+	return loc[0]
+}
 
 // xbpqTrimModifier 从 token 尾部剥出 [修饰符] 列表，返回剩余字面与修饰符。
 func xbpqTrimModifier(token string) (string, []xbpqStep) {
@@ -277,6 +420,12 @@ func xbpqTrimModifier(token string) (string, []xbpqStep) {
 			if number, err := strconv.Atoi(strings.TrimSpace(payload)); err == nil && number >= 1 {
 				mod.index = number
 			}
+		case "排序":
+			for _, item := range xbpqSplitUnescaped(payload, ">") {
+				if item = strings.TrimSpace(item); item != "" {
+					mod.order = append(mod.order, item)
+				}
+			}
 		default:
 			mod.index = -1 // [右截] 等未支持项：保留字面，不再剥
 			open = -1
@@ -315,9 +464,10 @@ func xbpqSplitList(payload string) []string {
 
 // xbpqParseSteps 把「数组/列表」形态的 pattern 拆成截取步骤链。
 // pattern 形如 A&&B&&C&&D：(A,B)、(C,D) 两步链；单侧截取（A&& 或 &&B）亦兼容。
+// && 分隔符支持 \ 转义（\&& 中吃掉一个 &，剩下字面 &，XBPQ 转义符语义）。
 func xbpqParseSteps(pattern string) []xbpqStep {
 	var steps []xbpqStep
-	parts := strings.Split(pattern, "&&")
+	parts := xbpqSplitUnescaped(pattern, "&&")
 	if len(parts) == 1 {
 		return nil // 无 && 的单 token 不构成截取指令
 	}
@@ -329,26 +479,110 @@ func xbpqParseSteps(pattern string) []xbpqStep {
 			endRaw := strings.TrimSpace(parts[i+1])
 			end, endMods = xbpqTrimModifier(endRaw)
 		}
-		step := xbpqStep{start: startToken, end: end}
+		step := xbpqStep{start: xbpqUnescape(startToken), end: xbpqUnescape(end)}
 		if len(startMods) > 0 {
 			step = startMods[0]
-			step.start, step.end = startToken, end
+			step.start, step.end = xbpqUnescape(startToken), xbpqUnescape(end)
 			if len(endMods) > 0 {
 				step.contains = append(step.contains, endMods[0].contains...)
 				step.notContains = append(step.notContains, endMods[0].notContains...)
 				step.replaces = append(step.replaces, endMods[0].replaces...)
+				step.order = append(step.order, endMods[0].order...)
 				if endMods[0].index != 0 && step.index == 0 {
 					step.index = endMods[0].index
 				}
 			}
 		} else if len(endMods) > 0 {
 			step = endMods[0]
-			step.start, step.end = startToken, end
+			step.start, step.end = xbpqUnescape(startToken), xbpqUnescape(end)
 		}
 		steps = append(steps, step)
 		i++
 	}
 	return steps
+}
+
+// xbpqSplitTopLevelPlus 按 + 切分，但跳过 [修饰符] 方括号内部与被转义的 +。
+// 返回 nil 表示没有可切分的顶层 +（不是拼接形态）。
+func xbpqSplitTopLevelPlus(pattern string) []string {
+	var out []string
+	var cur strings.Builder
+	depth := 0
+	hasPlus := false
+	for i := 0; i < len(pattern); {
+		if pattern[i] == '\\' && i+1 < len(pattern) {
+			cur.WriteByte(pattern[i])
+			cur.WriteByte(pattern[i+1])
+			i += 2
+			continue
+		}
+		switch pattern[i] {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case '+':
+			if depth == 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+				hasPlus = true
+				i++
+				continue
+			}
+		}
+		cur.WriteByte(pattern[i])
+		i++
+	}
+	if !hasPlus {
+		return nil
+	}
+	out = append(out, cur.String())
+	return out
+}
+
+// xbpqConcatCut 处理 + 拼接：把 pattern 按顶层 + 拆成若干段，含 && 的段作为
+// 截取指令，不含 && 的段作为字面量，顺序拼接结果。XBPQ 实战里 297 处 拼接、
+// 90 处 * 通配均依赖该语义（笔记：/play/+/vod/&&.html+-1-1.html）。
+func xbpqConcatCut(source, pattern string) (string, bool) {
+	if !strings.Contains(pattern, "+") {
+		return "", false
+	}
+	segments := xbpqSplitTopLevelPlus(pattern)
+	if len(segments) < 2 {
+		return "", false
+	}
+	fromJSON := xbpqJSONLikely(source)
+	hasCut := false
+	for _, s := range segments {
+		if strings.Contains(s, "&&") || (fromJSON && xbpqIsJSONPattern(strings.TrimSpace(s))) {
+			hasCut = true
+		}
+	}
+	if !hasCut {
+		return "", false
+	}
+	var b strings.Builder
+	for _, s := range segments {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		// 单引号包裹的是字面量段（json 模式拼接约定）。
+		if len(s) >= 2 && strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'") {
+			b.WriteString(s[1 : len(s)-1])
+			continue
+		}
+		if strings.Contains(s, "&&") {
+			b.WriteString(xbpqCutOnce(source, s))
+		} else if fromJSON && xbpqIsJSONPattern(s) {
+			b.WriteString(xbpqJSONStringValue(source, s))
+		} else {
+			b.WriteString(xbpqUnescape(s))
+		}
+	}
+	return b.String(), true
 }
 
 // xbpqCutOnce 按 pattern 在 source 上截取第一段。pattern 多组用 || 分隔时依次尝试。
@@ -359,7 +593,27 @@ func xbpqCutOnce(source, pattern string) string {
 	if strings.HasPrefix(pattern, "p:") || strings.HasPrefix(pattern, "jsoup:") {
 		return xbpqSelectorFirstString(source, pattern)
 	}
-	for _, part := range strings.Split(pattern, "||") {
+	// 二次截取填 "Base64"：整段只解码（笔记 item 8）。
+	if strings.EqualFold(strings.TrimSpace(pattern), "Base64") {
+		return xbpqDecodeBase64Segment(source)
+	}
+	// Base64(a&&b)：截取结果再 Base64 解码。
+	if inner, ok := xbpqBase64Wrapper(pattern); ok {
+		return xbpqDecodeBase64Segment(xbpqCutOnce(source, inner))
+	}
+	if value, ok := xbpqConcatCut(source, pattern); ok {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	if xbpqIsJSONPattern(pattern) && xbpqJSONLikely(source) {
+		return xbpqJSONStringValue(source, pattern)
+	}
+	// 笔记 item 1：不使用 && 的字段值是「指定字符串」（固定标题/线路标题等）。
+	if !xbpqIsJSONPattern(pattern) && len(xbpqSplitUnescaped(pattern, "&&")) == 1 && strings.Count(strings.ReplaceAll(pattern, `\||`, ""), "||") == 0 {
+		return xbpqUnescape(strings.TrimSpace(pattern))
+	}
+	for _, part := range xbpqSplitUnescaped(pattern, "||") {
 		steps := xbpqParseSteps(part)
 		if len(steps) == 0 {
 			continue
@@ -384,22 +638,19 @@ func xbpqApplyStepOnce(source string, step xbpqStep) (string, bool) {
 		return source, true
 	}
 	rest := source
-	startOffset := 0
 	if step.start != "" {
-		index := strings.Index(rest, step.start)
-		if index < 0 {
+		pos := xbpqMatchStart(xbpqCompileAnchor(step.start), rest)
+		if pos < 0 {
 			return "", false
 		}
-		rest = rest[index+len(step.start):]
-		startOffset = index + len(step.start)
+		rest = rest[pos:]
 	}
 	if step.end != "" {
-		index := strings.Index(rest, step.end)
+		index := xbpqMatchEnd(xbpqCompileAnchor(step.end), rest)
 		if index < 0 {
 			return "", false
 		}
 		rest = rest[:index]
-		_ = startOffset
 	}
 	return xbpqFinishSegment(rest, step), true
 }
@@ -433,13 +684,16 @@ func xbpqSplitNumbered(segment string) []string {
 	return strings.FieldsFunc(segment, func(r rune) bool { return r == '\n' || r == '\t' })
 }
 
-// xbpqList 按数组 pattern 迭代抽取全部条目（列表层）。
+// xbpqList 按数组 pattern 迭代抽取全部条目（列表层）。支持 j: json 路径数组。
 func xbpqList(source, pattern string) []string {
 	if source == "" || pattern == "" {
 		return nil
 	}
+	if strings.HasPrefix(pattern, "j:") && xbpqJSONLikely(source) {
+		return xbpqJSONArrayItems(source, pattern)
+	}
 	var items []string
-	for _, part := range strings.Split(pattern, "||") {
+	for _, part := range xbpqSplitUnescaped(pattern, "||") {
 		steps := xbpqParseSteps(part)
 		if len(steps) == 0 {
 			continue
@@ -469,42 +723,67 @@ func xbpqList(source, pattern string) []string {
 			rest = rest[consumed:]
 		}
 		if len(items) > 0 {
+			if len(first.order) > 0 {
+				items = xbpqOrderItems(items, first.order)
+			}
 			break
 		}
 	}
 	return items
 }
 
+// xbpqOrderItems 按 [排序:a>b>c] 的关键词优先级重排条目（线路数组常用）。
+func xbpqOrderItems(items []string, order []string) []string {
+	rank := func(item string) int {
+		for index, keyword := range order {
+			if strings.Contains(item, keyword) {
+				return index
+			}
+		}
+		return len(order)
+	}
+	out := append([]string{}, items...)
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && rank(out[j]) < rank(out[j-1]); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
 // xbpqApplyStepScan 找第一个 start&&end 段；返回段内容与「消费到的绝对偏移」。
+// 锚点支持 * 通配与转义；本处 start 截不出内容时自动跳到下一个 start 继续。
 func xbpqApplyStepScan(source string, step xbpqStep) (string, int, bool) {
 	if step.start == "" {
 		return "", 0, false
 	}
-	index := strings.Index(source, step.start)
-	if index < 0 {
-		return "", 0, false
-	}
-	body := source[index+len(step.start):]
-	stop := len(source)
-	if step.end != "" {
-		endIndex := strings.Index(body, step.end)
-		if endIndex < 0 {
+	startAnchor := xbpqCompileAnchor(step.start)
+	endAnchor := xbpqCompileAnchor(step.end)
+	offset := 0
+	for offset <= len(source) {
+		contentStart, matchEndOffset := xbpqMatchStartFrom(startAnchor, source, offset)
+		if matchEndOffset < 0 {
 			return "", 0, false
 		}
-		body = body[:endIndex]
-		stop = index + len(step.start) + endIndex
-	}
-	segment := xbpqFinishSegment(body, step)
-	if segment == "" {
-		// 修饰符不满足：跳过本 start，继续找下一个
-		if next := strings.Index(source[index+1:], step.start); next >= 0 {
-			skip := index + 1 + next
-			innerSegment, innerStop, ok := xbpqApplyStepScan(source[skip:], step)
-			return innerSegment, skip + innerStop, ok
+		body := source[matchEndOffset:]
+		stop := len(source)
+		if step.end != "" {
+			endIndex := xbpqMatchEnd(endAnchor, body)
+			if endIndex < 0 {
+				offset = contentStart + 1
+				continue
+			}
+			body = body[:endIndex]
+			stop = matchEndOffset + endIndex
 		}
-		return "", stop, false
+		segment := xbpqFinishSegment(body, step)
+		if segment == "" {
+			offset = contentStart + 1
+			continue
+		}
+		return segment, stop, true
 	}
-	return segment, stop, true
+	return "", 0, false
 }
 
 // ---- 选择器子集（p: 语法）----
@@ -927,6 +1206,21 @@ func (d *Downloader) xbpqExtractItems(ctx context.Context, rule xbpqRule, base, 
 		return nil
 	}
 	arrayPattern := rule.field(prefix+"数组", "数组")
+	// json 模式数组（笔记 item 7）：二次截取先按路径缩小，数组按路径迭代元素。
+	if arrayPattern != "" && strings.HasPrefix(arrayPattern, "j:") {
+		if region := rule.field(prefix+"二次截取", "二次截取"); region != "" && strings.HasPrefix(region, "j:") {
+			if scoped := xbpqJSONPathRaw(body, region); scoped != "" {
+				body = scoped
+			}
+		}
+		var items []xbpqItem
+		for _, one := range xbpqJSONArrayItems(body, arrayPattern) {
+			items = append(items, xbpqItem{text: one})
+		}
+		if len(items) > 0 {
+			return items
+		}
+	}
 	if arrayPattern == "" {
 		if jsonItems := xbpqJSONList(body, rule, prefix); len(jsonItems) > 0 {
 			return jsonItems
@@ -1164,7 +1458,7 @@ func xbpqCategoryURL(rule xbpqRule, base, categoryID string, page int) string {
 	if primary, _, hasSecond := strings.Cut(template, "#"); hasSecond && strings.Contains(template, "二级") {
 		template = primary
 	}
-	return xbpqRenderURL(template, base, values)
+	return xbpqCleanEmptySegments(xbpqRenderURL(template, base, values))
 }
 
 // ---- 目录 ----
