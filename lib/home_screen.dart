@@ -27,7 +27,6 @@ import 'widgets.dart';
 import 'vip_icon.dart';
 import 'settings_screen.dart';
 import 'profiles_screen.dart';
-import 'custom_sources_screen.dart';
 import 'search_input.dart';
 import 'sources_screen.dart';
 import 'batch_download_screen.dart';
@@ -236,18 +235,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_group.id != group.id) {
       _changeSource(group.sources.first, allSources: group.id == 'all');
     }
-  }
-
-  void _openCustomSources() {
-    Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CustomSourcesScreen(
-          repository: widget.repository,
-          store: widget.store,
-        ),
-      ),
-    );
   }
 
   void _changeCategory(String category) {
@@ -864,12 +851,6 @@ class _HomeScreenState extends State<HomeScreen> {
               checked: group.id == _group.id,
               onPressed: () => _changeGroup(group),
             ),
-          PullDownEntry(
-            label: '自定义源',
-            icon: Icons.add_circle_outline,
-            dividerBefore: true,
-            onPressed: _openCustomSources,
-          ),
         ],
         builder: (context, open) => GlassTapTarget(
           key: const ValueKey('source-switch'),

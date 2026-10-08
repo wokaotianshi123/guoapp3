@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core_bridge.dart';
+import 'custom_sources_screen.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'remote_widgets.dart';
@@ -185,6 +186,28 @@ class _SourcesScreenState extends State<SourcesScreen> {
               child: ListView(
                 padding: EdgeInsets.fromLTRB(16, 16, 16, 16 + bottomInset),
                 children: [
+                  Card(
+                    key: const ValueKey('custom-sources-entry'),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    clipBehavior: Clip.antiAlias,
+                    child: ListTile(
+                      leading: const Icon(Icons.add_circle_outline),
+                      title: const Text('自定义源'),
+                      subtitle: const Text(
+                        '录入 MacCMS 站点地址或粘贴 XBPQ 爬虫规则，支持批量导入与导出',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.push<void>(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => CustomSourcesScreen(
+                            repository: widget.repository,
+                            store: widget.store,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                   const Padding(
                     padding: EdgeInsets.only(bottom: 16),
                     child: Text(
