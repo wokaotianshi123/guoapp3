@@ -1,91 +1,85 @@
-本次需提交的变更清单（对比基线：20261005 从 GitHub 下载的原始快照）
+本次需提交的变更清单（对比基线：GitHub 当前 HEAD，对应本机 20261006guoapp3-main.zip 快照）
 ====================================================================
 
-一、覆盖已有文件（23 个）
-  根目录
-    README.md                                  删皮果表格行 + 青空说明改为 A123
-  lib/（前端）
-    lib/models.dart                            ★ 删除 piguo / sorani；CustomSourceSite 新增 rule 字段
-    lib/local_snapshot.dart                    ★ 白名单补 customSources（自定义源能保存）
-    lib/local_store.dart                       ★ 自定义源先于用户档案加载
-    lib/local_profiles.dart                    ★ 旧存档里的已下线站源自动过滤
-    lib/profiles_screen.dart                   ★ 编辑旧用户不再写回已下线站源
-    lib/core_bridge.dart                       ★ 自定义源接口透传 rule + export/import 两个方法
-    lib/custom_sources_screen.dart             ★ 编辑器加 XBPQ 规则开关与粘贴框；顶栏加导入/导出
-  native/core/（Go 核心）
-    native/core/app_categories.go
-    native/core/app_cover_metadata.go
-    native/core/app_runtime.go                 ★ add/update 增 rule；新增 export/importCustomSources
-    native/core/app_sources.go
-    native/core/provider_custom_maccms.go      ★ XBPQ 规则录入 + 导入导出全套逻辑
-    native/core/provider_duanju.go
-    native/core/provider_duanju_dispatch.go    ★ 接入 XBPQ 规则源取流
-    native/core/provider_duanju_maccms.go      ★ 分类导航形态扩展 + API 优先 + XBPQ 规则源分发
-    native/core/provider_duanju_test.go
-    native/core/provider_huangguo.go
-    native/core/provider_media.go
-  native/server/
-    native/server/main.go                      ★ 自定义源 rule 透传 + /export /import 端点
-    native/server/web/app.js                   ★ 规则编辑框 + 导入/导出按钮
-  test/
-    test/sources_test.dart
+本包为「覆盖/新增」叠加包：把包内文件按原路径放进仓库即可，包里没有的文件一律不要动。
+本批相对 HEAD 无任何删除文件，无需 git rm。
 
-二、新增文件（11 个）
-    native/core/provider_a123.go               A123 站源
-    native/core/provider_custom_maccms_test.go
-    native/core/provider_duanju_route_test.go
-    native/core/provider_maccms_api.go         ★ MacCMS 标准 JSON API（/api.php/provide/vod/）链路
-    native/core/provider_maccms_api_test.go    ★ 上面那个文件的离线单测
-    native/core/provider_maccms_generic.go     ★ 通用链接抽取兜底（首页无 API/导航时直接扫 <a> 抽详情链接 + 统计法反推分类）
-    native/core/provider_maccms_generic_test.go ★ 上面那个的离线单测
-    native/core/provider_maccms_listnews_test.go ★ listnews 风格自定义源（/listnews/N 分类、/news/N 详情，如 gzmzpx.com）离线单测
-    native/core/provider_xbpq.go               ★ XBPQ/CatVod 爬虫规则引擎（截取语法 A&&B、p: 选择器、GBK、POST 搜索、多线播放串）
-    native/core/provider_xbpq_test.go          ★ 规则引擎离线单测（截取/选择器/POST 搜索/long-text/注册）
-    native/core/provider_custom_import_test.go ★ 导入导出离线单测（回环、TVBox sites、纯文本清单、垃圾输入）
-    注：provider_duanju_maccms.go 已接入 provider_maccms_generic.go 的几个函数，
-        所以新增这两个文件是本批次编译通过的前提（否则报 undefined: maccmsGenericItems 等）。
-    注：provider_xbpq.go 被 provider_custom_maccms.go / provider_duanju_maccms.go /
-        provider_duanju_dispatch.go 引用，同样是本批次编译通过的前提。
+一、新增文件（8 个）—— 本批核心特性，缺少任意一个都会编译失败或功能不全
+    native/core/provider_xbpq.go               ★ XBPQ/CatVod 爬虫规则引擎（截取语法、|| 备选、[包含/替换/排序]、
+                                                  通配 *、转义 \、+ 拼接、字面量、p: 选择器、GBK、POST 搜索、
+                                                  @long-text、$$$ 多线播放串）
+    native/core/provider_xbpq_json.go          ★ j: JSON 路径模式 + Base64 解码语法
+    native/core/provider_xbpq_template.go      ★ 简写模板家族（MacCMS/stui 按 379 份真实规则聚类的高频备选链）
+    native/core/provider_xbpq_test.go          ★ 规则引擎离线单测
+    native/core/app_adfilter.go                ★ m3u8 广告分片过滤（来源指纹法）
+    native/core/app_adfilter_test.go           ★ 去广告离线单测
+    native/core/app_adblock_stream_test.go     ★ 流服务 adBlock 链路离线单测
+    native/core/provider_custom_import_test.go ★ 自定义源导入导出离线单测
 
-三、本批次相对上次打包的「内容刷新」（同一批文件，代码已更新）
-    以下文件在本包内已被刷新为最新版（无需在 GitHub 上重新删除/新增，直接覆盖即可）：
-      native/core/app_categories.go            ★ 自定义源的分类 ID 允许路径形式（/listnews/2 等），不再误报"内容分类无效"
-      native/core/provider_duanju.go           ★ 同上，validDuanjuCategory 同步放行自定义源路径形式分类 ID
-      native/core/provider_duanju_maccms.go    ★ 新增 listxx 家族 + XBPQ 规则源分发（目录/详情/搜索/分类四处）
-      native/core/provider_maccms_generic.go   ★ 修复同站判定被放宽导致外链（other.example.com）被误收为剧集的回归
-      native/core/app_runtime.go               ★ 自定义源 rule 字段 + 导入导出 action
-      native/core/provider_custom_maccms.go    ★ XBPQ 规则录入 + 导入导出
-      native/server/main.go                    ★ /api/custom-sources/export + /import
-      lib/models.dart                          ★ CustomSourceSite.rule
-    说明：与 00-上传说明 初次打包时同名，只是内容又迭代了两轮，直接覆盖上传即可。
+二、覆盖文件（35 个，全部为本地最新版，直接覆盖；含 README.md）
+    native/core/（Go 核心）
+      provider_custom_maccms.go                ★ 规则字段录入 + parseXBPQRule 校验 + 导入导出
+      provider_custom_maccms_test.go           ★ 配套单测更新
+      provider_duanju_maccms.go                ★ MacCMS 家族扩展 + XBPQ 规则源分发
+      provider_duanju_dispatch.go              ★ 云解析失败回落其它线路（sid）
+      provider_maccms_api.go                   ★ 标准 JSON API 链路刷新
+      provider_maccms_generic.go               ★ 通用链接抽取兜底刷新
+      provider_maccms_generic_test.go          ★ 配套单测
+      app_runtime.go                           ★ adBlock 开关 + rule 透传 + export/import action
+      app_stream.go                            ★ 流会话接过去广告开关
+      app_playback_routes.go                   ★ 播放线路（Routes）逻辑
+      models.go                                ★ Chapter.Routes 字段（XBPQ 多线路切换）
+      app_test.go / app_decode_test.go / app_playback_test.go / network_media_test.go   （4 个）配套测试更新
+    native/server/
+      main.go                                  ★ rule 透传 + /export /import 端点（adBlock 走 JSON 透传）
+      web/app.js                               ★ 规则编辑框 + 导入/导出按钮 + 去广告开关（localStorage 持久化）
+    lib/（Flutter 前端，Android / Windows / macOS / iOS 共用同一套代码）
+      home_screen.dart                         ★ 「自定义源」按钮从站源列表下拉移到站源管理页
+      sources_screen.dart                      ★ 站源管理页顶部新增「自定义源」入口卡片
+      models.dart                              ★ CustomSourceSite.rule、Chapter routes 序列化
+      core_bridge.dart                         ★ rule / adBlock / export / import 桥
+      custom_sources_screen.dart               ★ XBPQ 规则开关与粘贴框、导入导出入口
+      player_screen.dart                       ★ 播放去广告开关
+      playback_preferences.dart                ★ adBlock 持久化
+      playback_loader.dart                     ★ resolve 传 adBlock
+      playback_preloader.dart                  ★ 预加载走同一会话开关
+      player_menu.dart                         ★ 菜单开关入口
+      lan_playback.dart                        ★ 局域网播放同步携带开关
+      local_media_screen.dart                  ★ 本地媒体合并适配
+    test/ 与 integration_test/（Dart 测试更新）
+      test/fixtures.dart
+      test/downloads_test.dart
+      test/playback_loader_test.dart
+      test/player_fixtures.dart
+      integration_test/playback_test.dart
+    README.md                                  ★ 1.1.0+80 本轮特性说明（XBPQ 引擎 / 去广告 / 导入导出）
 
-四、必须在 GitHub 上删除（2 个）—— 不做会让 Go 编译失败
-    native/core/provider_sorani.go
-    native/core/provider_sorani_client.go
-    原因：这两个文件引用 sourceSorani 常量，而新版的 provider_huangguo.go 已删掉该常量，
-          只传上面那批覆盖文件而不删它们，会报 undefined: sourceSorani。
+三、上一批（20261005 清单）的处理结果
+    上批 23 个覆盖文件 + 11 个新增文件已全部进入 GitHub HEAD，本包不再重复；
+    其中 provider_custom_maccms.go、app_runtime.go、main.go、web/app.js、models.dart、
+    provider_maccms_api.go、provider_maccms_generic.go、provider_duanju_maccms.go、
+    provider_duanju_dispatch.go、custom_sources_screen.dart、core_bridge.dart 本批有新一轮改动，
+    按上面第二节覆盖即可。
+    上批要求删除的 provider_sorani.go / provider_sorani_client.go 已删除完毕，本批无删除项。
 
-五、不要提交的文件
-    .github/workflows/build.yml
-    本地那份把 push / pull_request 触发注释掉了，只剩 workflow_dispatch。
-    仓库里现在是启用状态，除非你确实想改成只能手动触发，否则别覆盖它。
-    （dist/ 与 build/ 是空目录，无需处理。）
-    native/server/web/index.html / app.css / hls.min.js：基线已有且本地未改动，无需提交。
+四、不要提交的文件
+    .github/workflows/build.yml（本地与 HEAD 完全一致，无需处理）
+    pubspec.yaml / pubspec.lock / android / ios / windows / macos / scripts（本批无改动，勿动）
+    native/server/web/index.html、app.css、hls.min.js（无改动）
+    dist/、build/ 为本地空构建目录，忽略。
 
-六、建议上传方式
-    A. 网页拖拽：把本文件夹里的全部内容（不含本说明）拖进仓库对应目录提交；
-       删除那两个文件要到 GitHub 打开该文件 → 右上角 Delete file → Commit。
-    B. 更稳妥（推荐，能保证"删除"也生效）：
-       git clone 仓库 → 用本文件夹内容覆盖同名文件 → git rm native/core/provider_sorani*.go
-       → git add -A && git commit && git push
+五、上传方式（二选一）
+    A. 网页拖拽：GitHub 仓库页 Add files → Upload files，按目录结构拖入本包内容（README.md 直接覆盖）。
+       一次拖不全可以分目录多次提交。
+    B. git 命令行（推荐，最不容易漏路径）：
+       git clone https://github.com/WangXingFan/guoapp.git
+       把本包全部内容（不含本说明.txt）覆盖到克隆目录同路径
+       git add -A && git commit -m "1.1.0+80: XBPQ 规则引擎、播放去广告、导入导出" && git push
+    推 main 分支即自动触发 Build app packages，或 Actions 页手动 workflow_dispatch。
 
-七、功能说明（本批两大新特性）
-    1. XBPQ 爬虫规则识别：自定义源录入时粘贴规则 JSON（wwgz 截取风格或
-       gimyai p: 选择器风格均可），核心按「数组/标题/链接/图片/播放数组…」
-       逐项截取，支持 || 备选、[包含:]/[替换:]、p: 选择器、GBK 转码、
-       POST 搜索、@long-text 合并、尾逗号修复、$$$ 多线播放串。
-       爬虫 jar（type=3 / spider）无法在 Go 核心执行，不渲染。
-    2. 导入导出：桌面/移动 App 的自定义源页 + Web 版均可「导出 JSON」「导入文件」。
-       导入兼容：自有导出格式 / 纯数组 / 「名称,网址」txt 清单 / TVBox 配置
-       （sites/whitelist 数组、maccms api 地址收敛、ext 内嵌规则、jar 条目逐条跳过）。
-       重复导入走更新而非报错；导出文件可直接喂回导入。
+六、验证结论（本机 2026-10-08）
+    go build ./... 通过；go vet 通过；XBPQ 全部 15 项测试通过（含真实站 6789ysw 四步回归）；
+    scripts Python 测试 38 通过 1 跳过；
+    红果目录持久化 6 项既有测试失败为基线遗留（fixture 与翻页时序问题，非本批引入，
+    且 CI 中 go test 为 continue-on-error，不阻断出包）。
+    Flutter/Dart 侧本机无工具链，由 CI 的 dart format / dart analyze / flutter test 验证。

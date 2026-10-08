@@ -4,12 +4,53 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'app_layout.dart';
 import 'core_bridge.dart';
 import 'local_store.dart';
 import 'models.dart';
 import 'remote_widgets.dart';
 import 'widgets.dart';
+
+/// 电视（Android TV 遥控器）焦点模式下的输入框方向键处理器。
+///
+/// [TextField] 内部的 [EditableText] 会把四个方向键当作光标移动消费掉，事件
+/// 不再传递给焦点遍历系统，导致遥控器焦点被困在输入框内、无法移到按钮。这里在
+/// 叶子 [FocusNode.onKeyEvent]（早于文本编辑快捷键执行）拦截方向键，仅当
+/// 处于电视焦点模式时改用 [FocusNode.focusInDirection] 把焦点移出输入框；对应方向
+/// 没有可聚焦目标时返回 [KeyEventResult.ignored] 交回默认行为，手机/桌面软键盘
+/// 输入不受影响。
+KeyEventResult _tvEscapeField(FocusNode node, KeyEvent event) {
+  if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+    return KeyEventResult.ignored;
+  }
+  final TraversalDirection direction;
+  if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+    direction = TraversalDirection.up;
+  } else if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+    direction = TraversalDirection.down;
+  } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+    direction = TraversalDirection.left;
+  } else if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+    direction = TraversalDirection.right;
+  } else {
+    return KeyEventResult.ignored;
+  }
+  final context = node.context;
+  if (context == null || !AppLayout.isTelevision(context)) {
+    return KeyEventResult.ignored;
+  }
+  final moved = node.focusInDirection(direction);
+  return moved ? KeyEventResult.handled : KeyEventResult.ignored;
+}
+
+/// 创建一个带电视（遥控器）焦点逃逸能力的 [FocusNode]，供弹框输入框使用。
+FocusNode _tvFieldNode({String? debugLabel}) {
+  final node = FocusNode(debugLabel: debugLabel);
+  node.onKeyEvent = _tvEscapeField;
+  return node;
+}
 
 /// 自定义站源管理界面。
 ///
@@ -384,6 +425,9 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
   late final TextEditingController _name;
   late final TextEditingController _base;
   late final TextEditingController _rule;
+  final FocusNode _nameNode = _tvFieldNode(debugLabel: 'custom-source-name');
+  final FocusNode _baseNode = _tvFieldNode(debugLabel: 'custom-source-base');
+  final FocusNode _ruleNode = _tvFieldNode(debugLabel: 'custom-source-rule');
   bool _ruleMode = false;
   bool _busy = false;
   String? _errorFixed;
@@ -395,6 +439,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
     _base = TextEditingController(text: widget.existing?.base ?? '');
     _rule = TextEditingController(text: widget.existing?.rule ?? '');
     _ruleMode = widget.existing?.hasRule ?? false;
+    ensureTelevisionFocus(context);
   }
 
   @override
@@ -402,6 +447,9 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
     _name.dispose();
     _base.dispose();
     _rule.dispose();
+    _nameNode.dispose();
+    _baseNode.dispose();
+    _ruleNode.dispose();
     super.dispose();
   }
 
@@ -469,6 +517,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
               TextField(
                 key: const ValueKey('custom-source-name'),
                 controller: _name,
+                focusNode: _nameNode,
                 enabled: !_busy,
                 maxLength: 40,
                 textInputAction: TextInputAction.next,
@@ -481,8 +530,10 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
               TextField(
                 key: const ValueKey('custom-source-base'),
                 controller: _base,
+                focusNode: _baseNode,
                 enabled: !_busy && !_ruleMode,
                 keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.next,
                 autocorrect: false,
                 decoration: InputDecoration(
                   labelText: '源网址',
@@ -507,6 +558,7 @@ class _CustomSourceEditorState extends State<_CustomSourceEditor> {
                   child: TextField(
                     key: const ValueKey('custom-source-rule'),
                     controller: _rule,
+                    focusNode: _ruleNode,
                     enabled: !_busy,
                     maxLines: 8,
                     minLines: 4,
@@ -564,12 +616,22 @@ class _CustomSourceImportDialog extends StatefulWidget {
 
 class _CustomSourceImportDialogState extends State<_CustomSourceImportDialog> {
   final TextEditingController _url = TextEditingController();
+  final FocusNode _urlNode =
+      _tvFieldNode(debugLabel: 'custom-source-import-url');
   bool _fileMode = true;
 
   @override
   void dispose() {
     _url.dispose();
+    _urlNode.dispose();
     super.dispose();
+  }
+
+  void _submitUrl() {
+    final url = _url.text.trim();
+    if (url.isEmpty) return;
+    _urlNode.unfocus();
+    Navigator.pop(context, url);
   }
 
   Future<void> _pickFile() async {
@@ -601,6 +663,7 @@ class _CustomSourceImportDialogState extends State<_CustomSourceImportDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final television = AppLayout.isTelevision(context);
     return AlertDialog(
       title: const Text('导入自定义源'),
       content: SizedBox(
@@ -639,16 +702,37 @@ class _CustomSourceImportDialogState extends State<_CustomSourceImportDialog> {
             else
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: TextField(
-                  key: const ValueKey('custom-source-import-url'),
-                  controller: _url,
-                  autofocus: true,
-                  maxLines: 3,
-                  decoration: const InputDecoration(
-                    labelText: '配置地址',
-                    hintText: 'https://…/config.json',
-                    border: OutlineInputBorder(),
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      key: const ValueKey('custom-source-import-url'),
+                      controller: _url,
+                      focusNode: _urlNode,
+                      // 电视模式下不自动进入输入框，焦点先落在开关/按钮上，
+                      // 用方向键主动进入；方向键在框内可逃逸（见 _tvFieldNode）。
+                      autofocus: !television,
+                      maxLines: 1,
+                      keyboardType: TextInputType.url,
+                      textInputAction: TextInputAction.done,
+                      autocorrect: false,
+                      onSubmitted: (_) => _submitUrl(),
+                      decoration: const InputDecoration(
+                        labelText: '配置地址',
+                        hintText: 'https://…/config.json',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    if (television)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text(
+                          '遥控器：输入完成后按确认键直接导入；'
+                          '按方向键可离开输入框选择其它按钮。',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                  ],
                 ),
               ),
           ],
@@ -662,11 +746,7 @@ class _CustomSourceImportDialogState extends State<_CustomSourceImportDialog> {
         if (!_fileMode)
           FilledButton(
             key: const ValueKey('custom-source-import-submit'),
-            onPressed: () {
-              final url = _url.text.trim();
-              if (url.isEmpty) return;
-              Navigator.pop(context, url);
-            },
+            onPressed: _submitUrl,
             child: const Text('导入'),
           ),
       ],

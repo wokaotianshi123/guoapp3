@@ -10,6 +10,8 @@ Flutter 多端独立短剧应用，原名“短剧库 APP”。站源请求、�
 2. 播放去广告（`native/core/app_adfilter.go`）。m3u8 媒体分片清单按「来源指纹」清洗：统计各分片 URL 的 host+目录占比，占比最高的视为主时间线，丢弃来自其它 host/目录的插播分片及其注释行；主指纹占比低于 40% 时判定结构不可信、原样放行，master 多码率清单不处理。流服务 `nativeOpen` 增加 `adBlock` 开关，请求未显式给出时默认开启；播放器提供开关并随播放偏好持久化（`lib/player_screen.dart`、`lib/playback_preferences.dart`）。
 3. 自定义源导入导出（`native/core/provider_custom_maccms.go`、`app_runtime.go`、`native/server/main.go`）。App 自定义源页与 Web 版均可导出 JSON / 导入文件；导入兼容自有格式、纯数组、「名称,网址」txt 清单与 TVBox 配置（sites 数组、maccms api 收敛、ext 内嵌规则、jar 条目逐条跳过），重复导入走更新，导出文件可喂回导入。
 4. MacCMS 通用链路加固（`provider_maccms_api.go`、`provider_maccms_generic.go`、`provider_duanju_maccms.go`、`provider_duanju_dispatch.go`）：标准 JSON API 优先、listxx 家族与路径式泛型目录扩展、播放页云解析失败时回落同剧其它线路（sid）。
+5. 界面调整（四端共用 Flutter 代码）：首页标题「切换站源」下拉中的「自定义源」入口移除，改为在「站源管理」页顶部以卡片入口呈现（点击进入自定义源编辑页，含 XBPQ 规则录入与导入 / 导出）；设置页与详情页原有站源管理入口不变。
+6. Android TV 遥控器输入框焦点修复（`lib/custom_sources_screen.dart`）：自定义源界面上「新增 / 编辑」弹窗的源名称、源网址、规则三个输入框，以及「导入」弹窗的网络配置地址输入框，原先一旦获得焦点，遥控器方向键会被输入框当作光标移动消费掉，焦点被困在输入框内无法移到「保存 / 导入 / 取消」按钮，导致无法正常录入网址。现在为这些输入框挂上专用焦点节点：电视模式（`AppLayout.isTelevision`）下拦截方向键并改用 `focusInDirection` 把焦点移出输入框（对应方向无可聚焦目标时交回默认行为），非电视模式不受影响；导入弹窗在电视下不再自动进入输入框，焦点先落在开关 / 按钮上，方向键主动进入，输入完成后按遥控器确认键即可直接导入，并显示一行操作提示；编辑弹窗打开时补充初始焦点引导。
 
 本机验证：Go `go build ./...` 与 `go vet` 全部通过，XBPQ 引擎与目录回归 15 项测试全部通过（含真实站 6789ysw 四步链路：目录 36 条、详情 42 集 4 线路、m3u8 206 行）；打包脚本 Python 测试 38 项通过、1 项按平台跳过。红果目录持久化的 6 项既有测试在本机失败（fixture 深扫与通道重开时序，非本批改动引入；CI 中 `go test` 按 2026-09-21 约定 continue-on-error，不阻断打包）。真实设备播放与三平台构建仍以 GitHub Actions 结果为准。
 
