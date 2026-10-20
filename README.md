@@ -1134,7 +1134,7 @@ python3 scripts/sync_source.py --check
 
 以下保留历史版本的实施与检查记录。
 
-0.2.21+27 修正播放器页面外壳跟随浅色 / 深色主题，视频画布与覆盖控制保持深色；画质增强关闭时隐藏画面类型和原画对比，开启后展开配置；原画对比不再等待渲染确认成功才可用；Android 自动档先保流畅使用高质量缩放，清晰优先才尝试更高负载增强。本轮通过 ADB 确认当前前台 App 为 `com.duanju.duanju_app/.MainActivity`、进程 `29688`，并按 `logcat --pid=29688` 定位当前 App 日志；当时该进程没有可读历史日志行。清理本项目可再生成的 `build` / `.dart_tool` 缓存后，窄范围 `dart analyze lib/player_screen.dart lib/player_menu.dart lib/video_enhancement_settings.dart lib/video_enhancement.dart lib/video_enhancement_policy.dart test/theme_test.dart` 完成，仅剩既有 info 级 lint；新增播放器主题用例 `flutter test test/theme_test.dart --plain-name "player shell follows light theme while video controls stay dark"` 通过。整份 `test/theme_test.dart` 仍有既有导航断言 `settings changes open routes without losing the active tab` 未通过，未作为本轮验收结论；本轮没有平台构建、设备复验、新 APK、Windows 完整包或 iOS 应用。30 项已实现待验证仍保持未勾选。
+0.2.21+27 修正播放器页面外壳跟随浅色 / 深色主题，视频画布与覆盖控制保持深色；画质增强关闭时隐藏画面类型和原画对比，开启后展开配置；原画对比不再等待渲染确认成功才可用；Android 自动档先保流畅使用高质量缩放，清晰优先才尝试更高负载增强。本轮通过 ADB 确认当前前台 App 为 `/.MainActivity`、进程 `29688`，并按 `logcat --pid=29688` 定位当前 App 日志；当时该进程没有可读历史日志行。清理本项目可再生成的 `build` / `.dart_tool` 缓存后，窄范围 `dart analyze lib/player_screen.dart lib/player_menu.dart lib/video_enhancement_settings.dart lib/video_enhancement.dart lib/video_enhancement_policy.dart test/theme_test.dart` 完成，仅剩既有 info 级 lint；新增播放器主题用例 `flutter test test/theme_test.dart --plain-name "player shell follows light theme while video controls stay dark"` 通过。整份 `test/theme_test.dart` 仍有既有导航断言 `settings changes open routes without losing the active tab` 未通过，未作为本轮验收结论；本轮没有平台构建、设备复验、新 APK、Windows 完整包或 iOS 应用。30 项已实现待验证仍保持未勾选。
 
 以下保留历史版本的实施与检查记录。
 
