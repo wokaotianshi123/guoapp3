@@ -21,7 +21,7 @@ if (releaseKey.exists()) {
 }
 
 android {
-    namespace = "com.duanju.duanju_app"
+    namespace = "com.duanjuzyz.duanju_app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "28.2.13676358"
 
@@ -31,7 +31,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.duanju.duanju_app"
+        applicationId = "com.duanjuzyz.duanju_app"
         minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
